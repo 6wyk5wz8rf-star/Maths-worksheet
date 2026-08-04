@@ -1,0 +1,13 @@
+{
+  "name": "Maths Page Studio",
+  "short_name": "Page Studio",
+  "description": "Turn copied mathematics questions into calm, accurate, printable worksheets.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f1ed",
+  "theme_color": "#4f4b86",
+  "icons": [
+    { "src": "./assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
