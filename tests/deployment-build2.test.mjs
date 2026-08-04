@@ -69,7 +69,7 @@ test('Build 3 release-addresses its changed module graph so an existing installe
     readProjectFile('js/state.js'),
     readProjectFile('service-worker.js'),
   ]);
-  const release = 'build3-v3';
+  const release = 'build3-v4';
   assert.match(html, new RegExp(`\\./js/app\\.js\\?v=${release}`));
   for (const source of [app, state]) assert.match(source, new RegExp(`\\?v=${release}`));
   for (const path of [

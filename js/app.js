@@ -23,17 +23,17 @@ import {
   saveProject,
   worksheetActions,
   createId,
-} from './state.js?v=build3-v3';
-import { paginateWorksheet, mmToPx } from './pagination.js?v=build3-v3';
+} from './state.js?v=build3-v4';
+import { paginateWorksheet, mmToPx } from './pagination.js?v=build3-v4';
 import {
   SECTION_ROLES,
   STYLE_PRESETS,
   WORKSHEET_PURPOSES,
   suggestNewQuestionOrder,
   suggestWorksheetArchitecture,
-} from './worksheet-architecture.js?v=build3-v3';
-import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=build3-v3';
-import { createSafeNumberVariation } from './number-variation.js?v=build3-v3';
+} from './worksheet-architecture.js?v=build3-v4';
+import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=build3-v4';
+import { createSafeNumberVariation } from './number-variation.js?v=build3-v4';
 
 const SAMPLE_TEXT = `Place value
 
@@ -1643,6 +1643,47 @@ function applySafeNumberVariation() {
   toast('A constraint-safe value variation was created in this version.');
 }
 
+// Teacher-only fields are deliberately saved through a short debounce as well
+// as on `change`. Textareas can otherwise be visibly updated while a quick
+// switch to Print replaces the inspector before the browser has fired its
+// change event. This keeps notes as reliable as the other composition controls
+// without adding a history entry for every keystroke.
+let teacherFieldSaveTimer = null;
+
+function teacherFieldDetails(target) {
+  if (target.matches('[data-role="teacher-answer"]')) return { key: 'answer', value: target.value || null };
+  if (target.matches('[data-role="teacher-notes"]')) return { key: 'notes', value: target.value };
+  if (target.matches('[data-role="teacher-field"]')) return { key: target.dataset.key, value: target.value };
+  return null;
+}
+
+function persistTeacherField(block, details) {
+  if (!block || !details?.key) return false;
+  if (String(block.teacher?.[details.key] ?? '') === String(details.value ?? '')) return true;
+  store.dispatch(worksheetActions.updateBlock(block.id, {
+    teacher: { ...block.teacher, [details.key]: details.value },
+  }));
+  return true;
+}
+
+function saveTeacherFieldFromTarget(target, worksheet = store.getState(), block = selectedBlock(worksheet)) {
+  return persistTeacherField(block, teacherFieldDetails(target));
+}
+
+function queueTeacherFieldSave(target) {
+  const details = teacherFieldDetails(target);
+  const worksheet = store.getState();
+  const block = selectedBlock(worksheet);
+  if (!details || !block) return;
+  const versionId = masterWorksheet().versions?.activeId ?? 'master';
+  clearTimeout(teacherFieldSaveTimer);
+  teacherFieldSaveTimer = setTimeout(() => {
+    if ((masterWorksheet().versions?.activeId ?? 'master') !== versionId) return;
+    const active = store.getState().blocks.find((item) => item.id === block.id);
+    persistTeacherField(active, details);
+  }, 180);
+}
+
 function attachModel(family) {
   const worksheet = store.getState();
   const block = selectedBlock(worksheet);
@@ -1784,6 +1825,7 @@ document.addEventListener('input', (event) => {
     render();
     requestAnimationFrame(() => document.querySelector('#model-bank-search')?.focus());
   }
+  if (teacherFieldDetails(event.target)) queueTeacherFieldSave(event.target);
 });
 
 document.addEventListener('change', (event) => {
@@ -1874,12 +1916,7 @@ document.addEventListener('change', (event) => {
   } else if (target.matches('[data-role="teacher-model-toggle"]') && block?.model) {
     const completedModel = target.checked ? { ...block.model, completionState: 'completed' } : null;
     store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, completedModel } }));
-  } else if (target.matches('[data-role="teacher-answer"]') && block) {
-    store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, answer: target.value || null } }));
-  } else if (target.matches('[data-role="teacher-notes"]') && block) {
-    store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, notes: target.value } }));
-  } else if (target.matches('[data-role="teacher-field"]') && block) {
-    store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, [target.dataset.key]: target.value } }));
+  } else if (saveTeacherFieldFromTarget(target, worksheet, block)) {
   } else if (target.matches('[data-role="metadata-field"]')) {
     store.dispatch(worksheetActions.updateMetadata({ [target.dataset.key]: target.value }));
     if (settingsDialog.open) renderSettingsContent();

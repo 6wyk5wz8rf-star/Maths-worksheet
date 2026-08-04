@@ -1,13 +1,13 @@
 // Change this namespace for every release that changes the offline shell.
 // Keeping it separate from the repository name means an existing iPad install
 // receives the complete Build 3 shell instead of retaining an earlier build.
-const CACHE = 'maths-page-studio-build-3-v3';
+const CACHE = 'maths-page-studio-build-3-v4';
 const SHELL = [
   './',
   './index.html',
   './css/styles.css',
   './js/app.js',
-  './js/app.js?v=build3-v3',
+  './js/app.js?v=build3-v4',
   './js/parser.js',
   './js/question-intelligence.js',
   './js/build2-model-bank.js',
@@ -16,15 +16,15 @@ const SHELL = [
   './js/model-renderers.js',
   './js/build2-model-renderers.js',
   './js/worksheet-architecture.js',
-  './js/worksheet-architecture.js?v=build3-v3',
+  './js/worksheet-architecture.js?v=build3-v4',
   './js/worksheet-versions.js',
-  './js/worksheet-versions.js?v=build3-v3',
+  './js/worksheet-versions.js?v=build3-v4',
   './js/number-variation.js',
-  './js/number-variation.js?v=build3-v3',
+  './js/number-variation.js?v=build3-v4',
   './js/state.js',
-  './js/state.js?v=build3-v3',
+  './js/state.js?v=build3-v4',
   './js/pagination.js',
-  './js/pagination.js?v=build3-v3',
+  './js/pagination.js?v=build3-v4',
   './assets/icon.svg',
   './manifest.webmanifest'
 ];
