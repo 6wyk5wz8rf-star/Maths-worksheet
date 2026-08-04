@@ -74,6 +74,20 @@ test('architecture suggestions preserve imported question order while adding a p
   assert.equal(suggested.architecture.stylePreset, 'guided');
 });
 
+test('recognisable imported section headings retain their teacher wording and acquire the right architecture role', () => {
+  const fluency = createQuestionBlock({ id: 'heading_fluency', kind: 'heading', originalText: 'Fluency', displayText: 'Fluency', section: 'heading_fluency' });
+  const reasoning = createQuestionBlock({ id: 'heading_reasoning', kind: 'heading', originalText: 'Reasoning', displayText: 'Reasoning', section: 'heading_reasoning' });
+  const problems = createQuestionBlock({ id: 'heading_problem', kind: 'heading', originalText: 'Problem solving', displayText: 'Problem solving', section: 'heading_problem' });
+  const suggested = suggestWorksheetArchitecture([fluency, reasoning, problems], { purpose: 'practice', idFactory: ids, forceSuggestions: true });
+
+  assert.deepEqual(suggested.architecture.sections.map((section) => [section.name, section.role, section.layout]), [
+    ['Fluency', 'fluency', 'rows'],
+    ['Reasoning', 'reasoning', 'flow'],
+    ['Problem solving', 'problem-solving', 'flow'],
+  ]);
+  assert.equal(suggested.architecture.compositionMode, 'rows');
+});
+
 test('short direct fluency questions receive compact half-width answer space while written methods stay spacious enough', () => {
   const suggested = suggestWorksheetArchitecture([
     question('fact', '6 × 8 ='),

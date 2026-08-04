@@ -23,17 +23,17 @@ import {
   saveProject,
   worksheetActions,
   createId,
-} from './state.js?v=build3-v2';
-import { paginateWorksheet, mmToPx } from './pagination.js?v=build3-v2';
+} from './state.js?v=build3-v3';
+import { paginateWorksheet, mmToPx } from './pagination.js?v=build3-v3';
 import {
   SECTION_ROLES,
   STYLE_PRESETS,
   WORKSHEET_PURPOSES,
   suggestNewQuestionOrder,
   suggestWorksheetArchitecture,
-} from './worksheet-architecture.js?v=build3-v2';
-import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=build3-v2';
-import { createSafeNumberVariation } from './number-variation.js?v=build3-v2';
+} from './worksheet-architecture.js?v=build3-v3';
+import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=build3-v3';
+import { createSafeNumberVariation } from './number-variation.js?v=build3-v3';
 
 const SAMPLE_TEXT = `Place value
 
@@ -1851,7 +1851,7 @@ document.addEventListener('change', (event) => {
     store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, [key]: value } }));
   } else if (target.matches('[data-role="section-role"]') && block?.kind === 'heading') {
     const sections = (worksheet.architecture?.sections ?? []).map((section) => section.id === block.section ? { ...section, role: target.value } : section);
-    store.dispatch(worksheetActions.updateBlock(block.id, { sectionMeta: { ...block.sectionMeta, role: target.value } }));
+    store.dispatch(worksheetActions.updateBlock(block.id, { sectionMeta: { ...block.sectionMeta, role: target.value, teacherChosen: true } }));
     store.dispatch(worksheetActions.updateArchitecture({ sections }));
   } else if (target.matches('[data-role="section-layout"]') && block?.kind === 'heading') {
     const sections = (worksheet.architecture?.sections ?? []).map((section) => section.id === block.section ? { ...section, layout: target.value } : section);

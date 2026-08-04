@@ -7,14 +7,14 @@ import {
   normalisePurpose,
   presetSettings,
   purposeToIntent,
-} from './worksheet-architecture.js?v=build3-v2';
+} from './worksheet-architecture.js?v=build3-v3';
 import {
   createPresetVariant,
   createVariant,
   deriveVersionOverrides,
   normaliseVersions,
   resolveWorksheetVersion,
-} from './worksheet-versions.js?v=build3-v2';
+} from './worksheet-versions.js?v=build3-v3';
 
 /**
  * Maths Page Studio worksheet state.
@@ -283,6 +283,7 @@ export function createQuestionBlock(overrides = {}, options = {}) {
       ? {
         role: ['fluency', 'guided-practice', 'independent-practice', 'reasoning', 'problem-solving', 'challenge', 'reflection', 'custom'].includes(source.sectionMeta?.role) ? source.sectionMeta.role : 'custom',
         style: ['inherit', 'plain', 'line', 'band', 'stage'].includes(source.sectionMeta?.style) ? source.sectionMeta.style : 'inherit',
+        teacherChosen: Boolean(source.sectionMeta?.teacherChosen),
       }
       : null,
     marks: source.marks ?? null,

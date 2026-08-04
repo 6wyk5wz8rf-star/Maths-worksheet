@@ -136,6 +136,17 @@ export function normalisePurpose(value, fallback = 'practice') {
 
 export function sectionRoleForBlock(block) {
   const text = words(block);
+  // Imported headings are already a useful piece of teacher intent.  Read
+  // them directly before falling back to a question's vocabulary, otherwise
+  // a concise heading such as “Problem solving” would become a generic
+  // custom section simply because it has no question-length context.
+  if (/^(?:warm[- ]?up|fluency|quick practice|facts?)\b/.test(text)) return 'fluency';
+  if (/^(?:guided practice|guided|worked example|we do)\b/.test(text)) return 'guided-practice';
+  if (/^(?:independent practice|independent|you do)\b/.test(text)) return 'independent-practice';
+  if (/^(?:reasoning|explain|justify|prove it?)\b/.test(text)) return 'reasoning';
+  if (/^(?:problem[ -]?solving|problems?)\b/.test(text)) return 'problem-solving';
+  if (/^(?:challenge|stretch|extension)\b/.test(text)) return 'challenge';
+  if (/^(?:reflection|review|check)\b/.test(text)) return 'reflection';
   if (/\b(challenge|stretch|deepen|extension)\b/.test(text)) return 'challenge';
   if (/\b(explain|justify|prove|reason|convince|error analysis|mistake|counterexample|compare methods?)\b/.test(text)) return 'reasoning';
   if (/\b(problem|word problem|altogether|how many|how much|context|journey|cost|perimeter|area)\b/.test(text) && text.length > 70) return 'problem-solving';
@@ -258,11 +269,15 @@ function normaliseSection(section, blocks) {
   const heading = blocks.find((block) => block.id === source.headingId || block.id === source.id);
   const id = asText(source.id, heading?.section ?? heading?.id ?? '');
   if (!id) return null;
+  const suppliedRole = oneOf(source.role, SECTION_ROLES, null);
+  const role = suppliedRole && (suppliedRole !== 'custom' || source.teacherChosen || heading?.sectionMeta?.teacherChosen)
+    ? suppliedRole
+    : heading ? sectionRoleForBlock(heading) : 'custom';
   return {
     id,
     headingId: asText(source.headingId, heading?.id ?? id),
     name: asText(source.name, heading?.displayText ?? 'Practice'),
-    role: oneOf(source.role, SECTION_ROLES, heading ? sectionRoleForBlock(heading) : 'custom'),
+    role,
     layout: oneOf(source.layout, COMPOSITION_MODES, 'flow'),
     startOnNewPage: Boolean(source.startOnNewPage),
     restartNumbering: Boolean(source.restartNumbering),
@@ -282,7 +297,7 @@ export function normaliseArchitecture(value, blocks = []) {
       const id = block.section || block.id;
       current = id;
       if (!known.has(id)) {
-        const section = normaliseSection({ id, headingId: block.id, name: block.displayText, role: block.sectionMeta?.role, style: block.sectionMeta?.style }, blocks);
+        const section = normaliseSection({ id, headingId: block.id, name: block.displayText, role: block.sectionMeta?.role, teacherChosen: block.sectionMeta?.teacherChosen, style: block.sectionMeta?.style }, blocks);
         if (section) {
           known.add(id);
           derived.push(section);
@@ -354,7 +369,10 @@ export function suggestWorksheetArchitecture(blocks, options = {}) {
   for (const sourceBlock of source) {
     let block = cloneValue(sourceBlock);
     if (block.kind === 'heading') {
-      const role = oneOf(block.sectionMeta?.role, SECTION_ROLES, sectionRoleForBlock(block));
+      const suppliedRole = oneOf(block.sectionMeta?.role, SECTION_ROLES, null);
+      const role = suppliedRole && (suppliedRole !== 'custom' || block.sectionMeta?.teacherChosen)
+        ? suppliedRole
+        : sectionRoleForBlock(block);
       const sectionId = addSection(block.displayText || sectionLabel(role), role, block);
       block.section = sectionId;
       block.sectionMeta = { ...(block.sectionMeta ?? {}), role, style: block.sectionMeta?.style ?? 'inherit' };
