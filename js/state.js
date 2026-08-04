@@ -1,3 +1,21 @@
+import {
+  BLOCK_FOOTPRINTS,
+  COMPOSITION_MODES,
+  QUESTION_BLOCK_PATTERNS,
+  WORKING_SPACE_TYPES,
+  normaliseArchitecture,
+  normalisePurpose,
+  presetSettings,
+  purposeToIntent,
+} from './worksheet-architecture.js';
+import {
+  createPresetVariant,
+  createVariant,
+  deriveVersionOverrides,
+  normaliseVersions,
+  resolveWorksheetVersion,
+} from './worksheet-versions.js';
+
 /**
  * Maths Page Studio worksheet state.
  *
@@ -6,16 +24,17 @@
  */
 
 export const WORKSHEET_SCHEMA = 'maths-page-studio/worksheet';
-export const WORKSHEET_VERSION = 2;
+export const WORKSHEET_VERSION = 3;
 export const STORAGE_PREFIX = 'maths-page-studio';
 export const PROJECT_INDEX_KEY = `${STORAGE_PREFIX}:projects:v${WORKSHEET_VERSION}`;
 const LEGACY_PROJECT_INDEX_KEYS = Object.freeze([
+  `${STORAGE_PREFIX}:projects:v2`,
   `${STORAGE_PREFIX}:projects:v1`,
 ]);
 export const CURRENT_PROJECT_KEY = `${STORAGE_PREFIX}:current-project`;
 
 const VALID_INTENTS = new Set(['practice', 'homework', 'assessment']);
-const VALID_OUTPUT_VIEWS = new Set(['pupil', 'teacher']);
+const VALID_OUTPUT_VIEWS = new Set(['pupil', 'teacher', 'answer']);
 const VALID_BLOCK_KINDS = new Set(['question', 'heading', 'instruction']);
 const VALID_MODEL_STATES = new Set(['blank', 'partly-completed', 'completed']);
 const VALID_MODEL_PURPOSES = new Set([
@@ -28,15 +47,9 @@ const VALID_MODEL_SIZES = new Set(['compact', 'standard', 'large']);
 const VALID_MODEL_POSITIONS = new Set(['above', 'beside', 'beneath']);
 const VALID_BUILD2_SCAFFOLD_STATES = new Set(['blank', 'guided', 'modelled']);
 const VALID_RESPONSE_TYPES = new Set([
-  'none',
-  'short-answer',
-  'short-line',
-  'writing-lines',
-  'squared-grid',
-  'open-box',
-  'model-completion',
+  ...WORKING_SPACE_TYPES,
 ]);
-const VALID_RESPONSE_SIZES = new Set(['compact', 'standard', 'generous']);
+const VALID_RESPONSE_SIZES = new Set(['small', 'compact', 'medium', 'standard', 'large', 'generous']);
 
 export const DEFAULT_GLOBAL_SETTINGS = Object.freeze({
   accentColor: '#4f568f',
@@ -53,6 +66,13 @@ export const DEFAULT_GLOBAL_SETTINGS = Object.freeze({
   pageSize: 'A4',
   orientation: 'portrait',
   marginMm: 12,
+  stylePreset: 'calm',
+  sectionStyle: 'line',
+  bodyScale: 'standard',
+  lineWeight: 'light',
+  showMarks: false,
+  totalMarks: null,
+  duplexPlan: 'single-sided',
 });
 
 export const DEFAULT_PAGE_ARRANGEMENT = Object.freeze({
@@ -205,11 +225,35 @@ export function createResponseRecipe(overrides = {}) {
     lines: safeNumber(source.lines),
     gridSizeMm: safeNumber(source.gridSizeMm, 5),
     label: asText(source.label),
+    rows: Math.max(0, Math.min(20, safeNumber(source.rows, 0))),
+    columns: Math.max(0, Math.min(8, safeNumber(source.columns, 0))),
+    customRows: Math.max(0, Math.min(20, safeNumber(source.customRows, 0))),
+    suggested: Boolean(source.suggested),
+    teacherChosen: Boolean(source.teacherChosen),
   };
 }
 
 export function normaliseResponseRecipe(recipe) {
   return createResponseRecipe(recipe);
+}
+
+function normaliseComposition(value = {}) {
+  const source = asObject(value);
+  const footprint = source.footprint === 'half-width' ? 'half'
+    : source.footprint === 'full-width' ? 'full'
+      : source.footprint === 'full-page' ? 'page'
+        : oneOf(source.footprint, new Set(BLOCK_FOOTPRINTS), 'standard');
+  return {
+    pattern: oneOf(source.pattern ?? source.blockType, new Set(QUESTION_BLOCK_PATTERNS), 'question-with-working'),
+    footprint,
+    keepTogether: source.keepTogether !== false,
+    startOnNewPage: Boolean(source.startOnNewPage),
+    keepWithNext: Boolean(source.keepWithNext),
+    hint: asText(source.hint),
+    vocabulary: uniqueStrings(source.vocabulary),
+    sentenceStem: asText(source.sentenceStem),
+    teacherChosen: Boolean(source.teacherChosen),
+  };
 }
 
 export function createQuestionBlock(overrides = {}, options = {}) {
@@ -231,7 +275,16 @@ export function createQuestionBlock(overrides = {}, options = {}) {
     originalText,
     displayText,
     number: kind === 'question' ? (source.number ?? source.questionNumber ?? null) : null,
+    manualNumber: kind === 'question'
+      ? (Object.hasOwn(source, 'manualNumber') ? source.manualNumber : source.number ?? source.questionNumber ?? null)
+      : null,
     section: source.section ?? source.sectionId ?? null,
+    sectionMeta: kind === 'heading'
+      ? {
+        role: ['fluency', 'guided-practice', 'independent-practice', 'reasoning', 'problem-solving', 'challenge', 'reflection', 'custom'].includes(source.sectionMeta?.role) ? source.sectionMeta.role : 'custom',
+        style: ['inherit', 'plain', 'line', 'band', 'stage'].includes(source.sectionMeta?.style) ? source.sectionMeta.style : 'inherit',
+      }
+      : null,
     marks: source.marks ?? null,
     extracted: cloneValue(asObject(source.extracted ?? source.extractedInfo ?? source.mathInfo)),
     source: {
@@ -244,18 +297,32 @@ export function createQuestionBlock(overrides = {}, options = {}) {
     },
     model: normaliseModelRecipe(source.model ?? source.modelRecipe),
     response: normaliseResponseRecipe(source.response ?? source.responseRecipe),
+    composition: normaliseComposition(source.composition ?? {
+      blockType: source.blockType,
+      footprint: source.footprint,
+      keepTogether: source.keepTogether,
+      startOnNewPage: source.startOnNewPage,
+      keepWithNext: source.keepWithNext,
+      hint: source.hint,
+      vocabulary: source.vocabulary,
+      sentenceStem: source.sentenceStem,
+      teacherChosen: source.teacherChosen,
+    }),
     layout: {
       size: oneOf(layout.size, VALID_MODEL_SIZES, 'standard'),
       modelPosition: oneOf(layout.modelPosition, VALID_MODEL_POSITIONS, 'beneath'),
       manualBreakBefore: Boolean(layout.manualBreakBefore),
       pageHint: safeNumber(layout.pageHint),
-      columnSpan: layout.columnSpan === 'full' ? 'full' : 'auto',
+      columnSpan: ['full', 'half'].includes(layout.columnSpan) ? layout.columnSpan : 'auto',
       keepWithNext: Boolean(layout.keepWithNext),
     },
     warnings: normaliseWarnings(source.warnings),
     teacher: {
       answer: teacher.answer ?? null,
       notes: asText(teacher.notes),
+      expectedMethod: asText(teacher.expectedMethod),
+      misconception: asText(teacher.misconception),
+      markingNote: asText(teacher.markingNote),
       completedModel: normaliseModelRecipe(teacher.completedModel),
     },
   };
@@ -271,10 +338,20 @@ function defaultTitle(intent) {
   return 'Maths practice';
 }
 
-export function renumberBlocks(blocks, questionNumbering = true) {
+export function renumberBlocks(blocks, questionNumbering = true, numbering = {}) {
+  const mode = numbering?.mode ?? 'automatic';
+  const restartAtSections = Boolean(numbering?.restartAtSections);
+  if (mode === 'manual' || !questionNumbering) {
+    return blocks.map((block) => block.kind !== 'question'
+      ? (block.number == null ? block : { ...block, number: null })
+      : (mode === 'manual' ? { ...block, number: block.manualNumber ?? block.number ?? null } : { ...block, number: null }));
+  }
   let nextNumber = 1;
+  let currentSection = null;
   return blocks.map((block) => {
     if (block.kind !== 'question') return block.number == null ? block : { ...block, number: null };
+    if (restartAtSections && block.section && block.section !== currentSection) nextNumber = 1;
+    currentSection = block.section;
     const number = questionNumbering ? nextNumber : null;
     nextNumber += 1;
     return block.number === number ? block : { ...block, number };
@@ -285,7 +362,8 @@ export function createWorksheet(overrides = {}, options = {}) {
   const source = asObject(overrides);
   const now = options.now?.() ?? source.metadata?.createdAt ?? defaultNow();
   const idFactory = options.idFactory ?? createId;
-  const intent = oneOf(source.intent, VALID_INTENTS, 'practice');
+  const purpose = normalisePurpose(source.architecture?.purpose ?? source.purpose ?? source.intent, 'practice');
+  const intent = purposeToIntent(purpose);
   const suppliedMetadata = asObject(source.metadata);
   const settings = {
     ...DEFAULT_GLOBAL_SETTINGS,
@@ -295,6 +373,16 @@ export function createWorksheet(overrides = {}, options = {}) {
   settings.orientation = settings.orientation === 'landscape' ? 'landscape' : 'portrait';
   settings.pageSize = 'A4';
   settings.marginMm = Math.min(25, Math.max(8, safeNumber(settings.marginMm, 12)));
+  settings.margins = settings.margins && typeof settings.margins === 'object' && !Array.isArray(settings.margins)
+    ? Object.fromEntries(['top', 'right', 'bottom', 'left'].map((edge) => [edge, Math.min(25, Math.max(8, safeNumber(settings.margins[edge], settings.marginMm)))]))
+    : null;
+  settings.stylePreset = typeof settings.stylePreset === 'string' ? settings.stylePreset : 'calm';
+  settings.sectionStyle = ['plain', 'line', 'band', 'stage'].includes(settings.sectionStyle) ? settings.sectionStyle : 'line';
+  settings.bodyScale = ['small', 'standard', 'large'].includes(settings.bodyScale) ? settings.bodyScale : 'standard';
+  settings.lineWeight = ['light', 'standard', 'strong'].includes(settings.lineWeight) ? settings.lineWeight : 'light';
+  settings.duplexPlan = ['single-sided', 'double-sided'].includes(settings.duplexPlan) ? settings.duplexPlan : 'single-sided';
+  settings.showMarks = Boolean(settings.showMarks);
+  settings.totalMarks = settings.totalMarks == null ? null : Math.max(0, Math.min(999, safeNumber(settings.totalMarks, null)));
 
   const blocks = (Array.isArray(source.blocks) ? source.blocks : source.questionBlocks ?? [])
     .map((block) => normaliseQuestionBlock(block, { idFactory }));
@@ -313,6 +401,23 @@ export function createWorksheet(overrides = {}, options = {}) {
     }
   }
 
+  const architecture = normaliseArchitecture({ ...asObject(source.architecture), purpose }, blocks);
+  const numberedBlocks = renumberBlocks(blocks, settings.questionNumbering, architecture.numbering);
+  const metadata = {
+    id: metadataId,
+    name: asText(suppliedMetadata.name, asText(suppliedMetadata.title, defaultTitle(intent))),
+    title: asText(suppliedMetadata.title, defaultTitle(intent)),
+    topic: asText(suppliedMetadata.topic),
+    learningIntention: asText(suppliedMetadata.learningIntention),
+    successCriteria: asText(suppliedMetadata.successCriteria),
+    teacher: asText(suppliedMetadata.teacher),
+    shortInstruction: asText(suppliedMetadata.shortInstruction),
+    className: asText(suppliedMetadata.className),
+    createdAt: asText(suppliedMetadata.createdAt, now),
+    updatedAt: asText(suppliedMetadata.updatedAt, now),
+  };
+  const versions = normaliseVersions(source.versions, { metadata }, { idFactory });
+
   return {
     schema: WORKSHEET_SCHEMA,
     version: WORKSHEET_VERSION,
@@ -322,29 +427,29 @@ export function createWorksheet(overrides = {}, options = {}) {
       migratedFrom: source.migration?.migratedFrom ?? null,
       migratedAt: source.migration?.migratedAt ?? null,
     },
-    metadata: {
-      id: metadataId,
-      name: asText(suppliedMetadata.name, asText(suppliedMetadata.title, defaultTitle(intent))),
-      title: asText(suppliedMetadata.title, defaultTitle(intent)),
-      shortInstruction: asText(suppliedMetadata.shortInstruction),
-      className: asText(suppliedMetadata.className),
-      createdAt: asText(suppliedMetadata.createdAt, now),
-      updatedAt: asText(suppliedMetadata.updatedAt, now),
-    },
+    metadata,
+    purpose,
     intent,
     outputView: oneOf(source.outputView ?? source.view, VALID_OUTPUT_VIEWS, 'pupil'),
     settings,
+    architecture,
+    versions,
     originalImport: {
       rawText: originalRaw,
       importedAt: originalSource.importedAt ?? (originalRaw ? now : null),
       source: originalSource.source ?? 'plain-text',
     },
-    blocks: renumberBlocks(blocks, settings.questionNumbering),
+    blocks: numberedBlocks,
     pageArrangement: {
       ...cloneValue(DEFAULT_PAGE_ARRANGEMENT),
       ...cloneValue(pageSource),
       manualBreakBefore,
       pageOverrides: cloneValue(asObject(pageSource.pageOverrides)),
+    },
+    printSettings: {
+      selectedVersionId: asText(source.printSettings?.selectedVersionId, versions.activeId),
+      includeAnswerPages: Boolean(source.printSettings?.includeAnswerPages),
+      duplexPlan: ['single-sided', 'double-sided'].includes(source.printSettings?.duplexPlan) ? source.printSettings.duplexPlan : settings.duplexPlan,
     },
     warnings: normaliseWarnings(source.warnings),
   };
@@ -428,6 +533,7 @@ function finaliseChange(previous, next, action) {
 
 export const ActionTypes = Object.freeze({
   UPDATE_METADATA: 'worksheet/update-metadata',
+  SET_PURPOSE: 'worksheet/set-purpose',
   SET_INTENT: 'worksheet/set-intent',
   SET_OUTPUT_VIEW: 'worksheet/set-output-view',
   UPDATE_SETTINGS: 'worksheet/update-settings',
@@ -445,10 +551,20 @@ export const ActionTypes = Object.freeze({
   JOIN_BLOCK: 'worksheet/join-block',
   SET_MANUAL_BREAK: 'worksheet/set-manual-break',
   UPDATE_PAGE_ARRANGEMENT: 'worksheet/update-page-arrangement',
+  UPDATE_ARCHITECTURE: 'worksheet/update-architecture',
+  APPLY_STYLE_PRESET: 'worksheet/apply-style-preset',
+  UPDATE_PRINT_SETTINGS: 'worksheet/update-print-settings',
+  SET_ACTIVE_VERSION: 'worksheet/set-active-version',
+  CREATE_VERSION: 'worksheet/create-version',
+  UPDATE_VERSION: 'worksheet/update-version',
+  REMOVE_VERSION: 'worksheet/remove-version',
+  RESET_VERSION_BLOCK: 'worksheet/reset-version-block',
+  APPLY_VERSION_ACTION: 'worksheet/apply-version-action',
 });
 
 export const worksheetActions = Object.freeze({
   updateMetadata: (patch) => ({ type: ActionTypes.UPDATE_METADATA, patch }),
+  setPurpose: (purpose) => ({ type: ActionTypes.SET_PURPOSE, purpose }),
   setIntent: (intent) => ({ type: ActionTypes.SET_INTENT, intent }),
   setOutputView: (view) => ({ type: ActionTypes.SET_OUTPUT_VIEW, view }),
   updateSettings: (patch) => ({ type: ActionTypes.UPDATE_SETTINGS, patch }),
@@ -474,6 +590,15 @@ export const worksheetActions = Object.freeze({
   joinBlock: (blockId, direction = 'next') => ({ type: ActionTypes.JOIN_BLOCK, blockId, direction }),
   setManualBreak: (blockId, enabled = true) => ({ type: ActionTypes.SET_MANUAL_BREAK, blockId, enabled }),
   updatePageArrangement: (patch) => ({ type: ActionTypes.UPDATE_PAGE_ARRANGEMENT, patch }),
+  updateArchitecture: (patch) => ({ type: ActionTypes.UPDATE_ARCHITECTURE, patch }),
+  applyStylePreset: (preset) => ({ type: ActionTypes.APPLY_STYLE_PRESET, preset }),
+  updatePrintSettings: (patch) => ({ type: ActionTypes.UPDATE_PRINT_SETTINGS, patch }),
+  setActiveVersion: (versionId) => ({ type: ActionTypes.SET_ACTIVE_VERSION, versionId }),
+  createVersion: (options) => ({ type: ActionTypes.CREATE_VERSION, options }),
+  updateVersion: (versionId, patch) => ({ type: ActionTypes.UPDATE_VERSION, versionId, patch }),
+  removeVersion: (versionId) => ({ type: ActionTypes.REMOVE_VERSION, versionId }),
+  resetVersionBlock: (versionId, blockId) => ({ type: ActionTypes.RESET_VERSION_BLOCK, versionId, blockId }),
+  applyVersionAction: (versionId, action) => ({ type: ActionTypes.APPLY_VERSION_ACTION, versionId, action }),
 });
 
 export function worksheetReducer(state, action, options = {}) {
@@ -485,17 +610,33 @@ export function worksheetReducer(state, action, options = {}) {
   switch (action.type) {
     case ActionTypes.UPDATE_METADATA: {
       const patch = asObject(action.patch);
-      const allowed = ['name', 'title', 'shortInstruction', 'className'];
+      const allowed = ['name', 'title', 'topic', 'learningIntention', 'successCriteria', 'teacher', 'shortInstruction', 'className'];
       const metadataPatch = {};
       for (const key of allowed) if (key in patch) metadataPatch[key] = asText(patch[key]);
       if (!Object.keys(metadataPatch).length) break;
       next = { ...state, metadata: { ...state.metadata, ...metadataPatch } };
       break;
     }
+    case ActionTypes.SET_PURPOSE: {
+      const purpose = normalisePurpose(action.purpose, null);
+      if (!purpose || purpose === state.purpose) break;
+      next = {
+        ...state,
+        purpose,
+        intent: purposeToIntent(purpose),
+        architecture: normaliseArchitecture({ ...state.architecture, purpose }, state.blocks),
+      };
+      break;
+    }
     case ActionTypes.SET_INTENT: {
       const intent = oneOf(action.intent, VALID_INTENTS, null);
       if (!intent || intent === state.intent) break;
-      next = { ...state, intent };
+      next = {
+        ...state,
+        intent,
+        purpose: intent,
+        architecture: normaliseArchitecture({ ...state.architecture, purpose: intent }, state.blocks),
+      };
       break;
     }
     case ActionTypes.SET_OUTPUT_VIEW: {
@@ -511,9 +652,19 @@ export function worksheetReducer(state, action, options = {}) {
       settings.pageSize = 'A4';
       settings.orientation = settings.orientation === 'landscape' ? 'landscape' : 'portrait';
       settings.marginMm = Math.min(25, Math.max(8, safeNumber(settings.marginMm, 12)));
+      settings.margins = settings.margins && typeof settings.margins === 'object' && !Array.isArray(settings.margins)
+        ? Object.fromEntries(['top', 'right', 'bottom', 'left'].map((edge) => [edge, Math.min(25, Math.max(8, safeNumber(settings.margins[edge], settings.marginMm)))]))
+        : null;
+      settings.stylePreset = typeof settings.stylePreset === 'string' ? settings.stylePreset : state.settings.stylePreset;
+      settings.sectionStyle = ['plain', 'line', 'band', 'stage'].includes(settings.sectionStyle) ? settings.sectionStyle : 'line';
+      settings.bodyScale = ['small', 'standard', 'large'].includes(settings.bodyScale) ? settings.bodyScale : 'standard';
+      settings.lineWeight = ['light', 'standard', 'strong'].includes(settings.lineWeight) ? settings.lineWeight : 'light';
+      settings.duplexPlan = ['single-sided', 'double-sided'].includes(settings.duplexPlan) ? settings.duplexPlan : 'single-sided';
+      settings.showMarks = Boolean(settings.showMarks);
+      settings.totalMarks = settings.totalMarks == null ? null : Math.max(0, Math.min(999, safeNumber(settings.totalMarks, null)));
       let blocks = state.blocks;
       if (settings.questionNumbering !== state.settings.questionNumbering) {
-        blocks = renumberBlocks(blocks, Boolean(settings.questionNumbering));
+        blocks = renumberBlocks(blocks, Boolean(settings.questionNumbering), state.architecture?.numbering);
       }
       next = { ...state, settings, blocks };
       break;
@@ -533,7 +684,8 @@ export function worksheetReducer(state, action, options = {}) {
     case ActionTypes.REPLACE_BLOCKS: {
       const blocks = (Array.isArray(action.blocks) ? action.blocks : [])
         .map((block) => normaliseQuestionBlock(block, { idFactory }));
-      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering) };
+      const architecture = normaliseArchitecture(state.architecture, blocks);
+      next = { ...state, architecture, blocks: renumberBlocks(blocks, state.settings.questionNumbering, architecture.numbering) };
       break;
     }
     case ActionTypes.ADD_BLOCK: {
@@ -541,7 +693,7 @@ export function worksheetReducer(state, action, options = {}) {
       const requested = Number.isInteger(action.index) ? action.index : state.blocks.length;
       const index = Math.max(0, Math.min(state.blocks.length, requested));
       const blocks = [...state.blocks.slice(0, index), block, ...state.blocks.slice(index)];
-      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering) };
+      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering, state.architecture?.numbering) };
       break;
     }
     case ActionTypes.UPDATE_BLOCK: {
@@ -557,14 +709,16 @@ export function worksheetReducer(state, action, options = {}) {
         id: current.id,
         model: 'model' in patch ? normaliseModelRecipe(patch.model) : current.model,
         response: 'response' in patch ? normaliseResponseRecipe(patch.response) : current.response,
+        composition: patch.composition ? { ...current.composition, ...patch.composition } : current.composition,
         layout: patch.layout ? { ...current.layout, ...patch.layout } : current.layout,
+        sectionMeta: patch.sectionMeta ? { ...current.sectionMeta, ...patch.sectionMeta } : current.sectionMeta,
         warnings: patch.warnings ? normaliseWarnings(patch.warnings) : current.warnings,
         teacher: patch.teacher ? { ...current.teacher, ...patch.teacher } : current.teacher,
       };
       const block = normaliseQuestionBlock(candidate, { idFactory: () => current.id });
       const blocks = [...state.blocks];
       blocks[index] = block;
-      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering) };
+      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering, state.architecture?.numbering) };
       break;
     }
     case ActionTypes.SET_MODEL: {
@@ -609,7 +763,7 @@ export function worksheetReducer(state, action, options = {}) {
       const blocks = [...state.blocks];
       const [block] = blocks.splice(fromIndex, 1);
       blocks.splice(toIndex, 0, block);
-      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering) };
+      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering, state.architecture?.numbering) };
       break;
     }
     case ActionTypes.DUPLICATE_BLOCK: {
@@ -619,7 +773,7 @@ export function worksheetReducer(state, action, options = {}) {
       copy.id = asText(action.newId) || idFactory('question');
       copy.layout.manualBreakBefore = false;
       const blocks = [...state.blocks.slice(0, index + 1), copy, ...state.blocks.slice(index + 1)];
-      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering) };
+      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering, state.architecture?.numbering) };
       break;
     }
     case ActionTypes.REMOVE_BLOCK: {
@@ -627,7 +781,7 @@ export function worksheetReducer(state, action, options = {}) {
       const blocks = state.blocks.filter((block) => block.id !== action.blockId);
       next = {
         ...state,
-        blocks: renumberBlocks(blocks, state.settings.questionNumbering),
+        blocks: renumberBlocks(blocks, state.settings.questionNumbering, state.architecture?.numbering),
         pageArrangement: {
           ...state.pageArrangement,
           manualBreakBefore: state.pageArrangement.manualBreakBefore.filter((id) => id !== action.blockId),
@@ -666,7 +820,7 @@ export function worksheetReducer(state, action, options = {}) {
         return block;
       });
       const blocks = replaceBlockAt(state.blocks, index, replacements);
-      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering) };
+      next = { ...state, blocks: renumberBlocks(blocks, state.settings.questionNumbering, state.architecture?.numbering) };
       break;
     }
     case ActionTypes.JOIN_BLOCK: {
@@ -708,7 +862,7 @@ export function worksheetReducer(state, action, options = {}) {
       ];
       next = {
         ...state,
-        blocks: renumberBlocks(blocks, state.settings.questionNumbering),
+        blocks: renumberBlocks(blocks, state.settings.questionNumbering, state.architecture?.numbering),
         pageArrangement: {
           ...state.pageArrangement,
           manualBreakBefore: state.pageArrangement.manualBreakBefore.filter((id) => id !== second.id),
@@ -751,6 +905,123 @@ export function worksheetReducer(state, action, options = {}) {
             : state.pageArrangement.pageOverrides,
         },
       };
+      break;
+    }
+    case ActionTypes.UPDATE_ARCHITECTURE: {
+      const architecture = normaliseArchitecture({ ...state.architecture, ...cloneValue(asObject(action.patch)) }, state.blocks);
+      const blocks = renumberBlocks(state.blocks, state.settings.questionNumbering, architecture.numbering);
+      next = { ...state, purpose: architecture.purpose, intent: purposeToIntent(architecture.purpose), architecture, blocks };
+      break;
+    }
+    case ActionTypes.APPLY_STYLE_PRESET: {
+      const preset = typeof action.preset === 'string' ? action.preset : 'calm';
+      const presetPatch = presetSettings(preset);
+      const settings = { ...state.settings, ...presetPatch, stylePreset: preset };
+      const architecture = normaliseArchitecture({ ...state.architecture, stylePreset: preset }, state.blocks);
+      next = { ...state, settings, architecture };
+      break;
+    }
+    case ActionTypes.UPDATE_PRINT_SETTINGS: {
+      const patch = asObject(action.patch);
+      const printSettings = {
+        ...state.printSettings,
+        ...cloneValue(patch),
+      };
+      printSettings.duplexPlan = ['single-sided', 'double-sided'].includes(printSettings.duplexPlan) ? printSettings.duplexPlan : 'single-sided';
+      printSettings.includeAnswerPages = Boolean(printSettings.includeAnswerPages);
+      const knownVersions = new Set((state.versions?.items ?? []).map((version) => version.id));
+      if (!knownVersions.has(printSettings.selectedVersionId)) printSettings.selectedVersionId = state.versions?.activeId ?? 'master';
+      next = { ...state, printSettings };
+      break;
+    }
+    case ActionTypes.SET_ACTIVE_VERSION: {
+      const versions = normaliseVersions(state.versions, state, { idFactory });
+      const version = versions.items.find((item) => item.id === action.versionId);
+      if (!version || version.id === versions.activeId) break;
+      next = {
+        ...state,
+        outputView: version.outputView ?? state.outputView,
+        versions: { ...versions, activeId: version.id },
+        printSettings: { ...state.printSettings, selectedVersionId: version.id },
+      };
+      break;
+    }
+    case ActionTypes.CREATE_VERSION: {
+      const options = asObject(action.options);
+      const versions = normaliseVersions(state.versions, state, { idFactory });
+      const type = typeof options.type === 'string' ? options.type : 'custom';
+      const version = options.preset === false
+        ? createVariant(options.overrides, { ...options, now: action.timestamp, idFactory })
+        : createPresetVariant(state, type, { ...options, now: action.timestamp, idFactory });
+      if (versions.items.some((item) => item.id === version.id)) break;
+      next = {
+        ...state,
+        outputView: version.outputView ?? state.outputView,
+        versions: { activeId: version.id, items: [...versions.items, version] },
+        printSettings: { ...state.printSettings, selectedVersionId: version.id },
+      };
+      break;
+    }
+    case ActionTypes.UPDATE_VERSION: {
+      const versions = normaliseVersions(state.versions, state, { idFactory });
+      const index = versions.items.findIndex((item) => item.id === action.versionId && item.id !== 'master');
+      if (index < 0) break;
+      const patch = asObject(action.patch);
+      const current = versions.items[index];
+      const updated = createVariant({ ...current.overrides, ...asObject(patch.overrides) }, {
+        ...current,
+        ...patch,
+        id: current.id,
+        now: current.createdAt,
+        idFactory,
+      });
+      const items = [...versions.items];
+      items[index] = updated;
+      next = { ...state, versions: { ...versions, items } };
+      break;
+    }
+    case ActionTypes.REMOVE_VERSION: {
+      const versions = normaliseVersions(state.versions, state, { idFactory });
+      if (action.versionId === 'master' || !versions.items.some((item) => item.id === action.versionId)) break;
+      const items = versions.items.filter((item) => item.id !== action.versionId);
+      const activeId = versions.activeId === action.versionId ? 'master' : versions.activeId;
+      next = {
+        ...state,
+        versions: { activeId, items },
+        outputView: activeId === 'master' ? state.outputView : items.find((item) => item.id === activeId)?.outputView ?? state.outputView,
+        printSettings: { ...state.printSettings, selectedVersionId: state.printSettings.selectedVersionId === action.versionId ? activeId : state.printSettings.selectedVersionId },
+      };
+      break;
+    }
+    case ActionTypes.RESET_VERSION_BLOCK: {
+      const versions = normaliseVersions(state.versions, state, { idFactory });
+      const index = versions.items.findIndex((item) => item.id === action.versionId && item.id !== 'master');
+      if (index < 0 || !state.blocks.some((block) => block.id === action.blockId)) break;
+      const current = versions.items[index];
+      const overrides = cloneValue(current.overrides);
+      delete overrides.blockPatches[action.blockId];
+      overrides.hiddenBlockIds = overrides.hiddenBlockIds.filter((id) => id !== action.blockId);
+      overrides.addedBlocks = overrides.addedBlocks.filter((block) => block.id !== action.blockId);
+      if (Array.isArray(overrides.order)) overrides.order = overrides.order.filter((id) => id !== action.blockId);
+      const items = [...versions.items];
+      items[index] = { ...current, overrides };
+      next = { ...state, versions: { ...versions, items } };
+      break;
+    }
+    case ActionTypes.APPLY_VERSION_ACTION: {
+      const versions = normaliseVersions(state.versions, state, { idFactory });
+      const versionId = action.versionId ?? versions.activeId;
+      const index = versions.items.findIndex((item) => item.id === versionId && item.id !== 'master');
+      const inner = action.action;
+      if (index < 0 || !inner || typeof inner.type !== 'string' || inner.type === ActionTypes.APPLY_VERSION_ACTION) break;
+      const base = { ...state, versions };
+      const effective = resolveWorksheetVersion(base, versionId);
+      const adjusted = worksheetReducer(effective, { ...inner, timestamp: action.timestamp }, options);
+      if (adjusted === effective) break;
+      const overrides = deriveVersionOverrides(base, adjusted);
+      const items = [...versions.items];
+      items[index] = { ...items[index], overrides };
+      next = { ...state, versions: { ...versions, items } };
       break;
     }
     default:
@@ -893,9 +1164,43 @@ export function duplicateProject(sourceOrId, options = {}, storage = getDefaultS
   duplicate.pageArrangement = cloneValue(source.pageArrangement);
   duplicate.blocks = source.blocks.map((block) => ({ ...cloneValue(block), id: idFactory('question') }));
   const idMap = new Map(source.blocks.map((block, index) => [block.id, duplicate.blocks[index].id]));
+  duplicate.blocks = duplicate.blocks.map((block) => ({
+    ...block,
+    section: idMap.get(block.section) ?? block.section,
+  }));
   duplicate.pageArrangement.manualBreakBefore = source.pageArrangement.manualBreakBefore
     .map((id) => idMap.get(id))
     .filter(Boolean);
+  duplicate.architecture = {
+    ...cloneValue(source.architecture),
+    sections: (source.architecture?.sections ?? []).map((section) => ({
+      ...cloneValue(section),
+      id: idMap.get(section.id) ?? section.id,
+      headingId: idMap.get(section.headingId) ?? section.headingId,
+    })),
+  };
+  const versionIdMap = new Map();
+  const sourceVersions = normaliseVersions(source.versions, source, { idFactory });
+  const copiedVersions = sourceVersions.items.map((version) => {
+    if (version.id === 'master') return version;
+    const nextId = idFactory('version');
+    versionIdMap.set(version.id, nextId);
+    const overrides = cloneValue(version.overrides);
+    overrides.blockPatches = Object.fromEntries(Object.entries(overrides.blockPatches ?? {}).map(([id, patch]) => [idMap.get(id) ?? id, patch]));
+    overrides.hiddenBlockIds = (overrides.hiddenBlockIds ?? []).map((id) => idMap.get(id) ?? id);
+    overrides.addedBlocks = (overrides.addedBlocks ?? []).map((block) => ({ ...block, id: idMap.get(block.id) ?? block.id, section: idMap.get(block.section) ?? block.section }));
+    overrides.order = Array.isArray(overrides.order) ? overrides.order.map((id) => idMap.get(id) ?? id) : null;
+    return { ...version, id: nextId, overrides };
+  });
+  const activeVersionId = sourceVersions.activeId === 'master' ? 'master' : versionIdMap.get(sourceVersions.activeId) ?? 'master';
+  duplicate.versions = { activeId: activeVersionId, items: copiedVersions };
+  duplicate.printSettings = {
+    ...duplicate.printSettings,
+    selectedVersionId: source.printSettings?.selectedVersionId === 'master'
+      ? 'master'
+      : versionIdMap.get(source.printSettings?.selectedVersionId) ?? activeVersionId,
+  };
+  duplicate.blocks = renumberBlocks(duplicate.blocks, duplicate.settings.questionNumbering, duplicate.architecture.numbering);
   saveProject(duplicate, storage);
   return duplicate;
 }

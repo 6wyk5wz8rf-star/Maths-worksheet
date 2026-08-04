@@ -1,6 +1,6 @@
 # Maths Page Studio
 
-Maths Page Studio turns copied mathematical questions into accurate, editable and printable A4 pupil worksheets. Build 2 deepens the same complete journey: **Paste → Check → Make → Print**, adding local question interpretation, model recommendations and an expanded Year 4 model bank.
+Maths Page Studio turns copied mathematical questions into accurate, editable and printable A4 pupil worksheets. Build 3 deepens the same complete journey: **Paste → Check → Compose → Print**, adding guided page architecture, controlled question blocks, pupil working space, linked differentiation versions and a strengthened print check.
 
 ## Run locally
 
@@ -20,21 +20,24 @@ The application is served from the repository root. Keep production asset paths 
 npm test
 ```
 
-The test suite covers parsing, question interpretation and recommendation rules, model integrity, state history, persistence structures, A4 pagination and Build 2 GitHub Pages/offline-shell checks.
+The test suite covers parsing, question interpretation and recommendation rules, model integrity, constrained value variation, Build 3 architecture and versions, state history, persistence structures, A4 pagination and GitHub Pages/offline-shell checks.
 
-Run the test suite before publishing Build 2. The deployment test verifies that every statically imported local module is pre-cached and that the HTML, manifest and worker retain project-relative paths.
+Run the test suite before publishing. The deployment test verifies that every statically imported local module is pre-cached and that the HTML, manifest and worker retain project-relative paths.
 
 ## Structure
 
 - `index.html` — semantic application shell and dialogs
 - `css/styles.css` — responsive editor, A4 worksheet and dedicated print styles
-- `js/app.js` — four-stage interface and interaction orchestration
+- `js/app.js` — four-stage interface, Compose controls and interaction orchestration
 - `js/parser.js` — lossless question import and mathematical extraction
 - `js/matcher.js` — deterministic local model matching
 - `js/model-registry.js` — central declarations for the expandable mathematical model bank
 - `js/model-renderers.js` — safe structured SVG/HTML renderers
-- `js/state.js` — worksheet schema, undo/redo and local project persistence
-- `js/pagination.js` — fixed A4 geometry and whole-block pagination
+- `js/state.js` — versioned worksheet schema, undo/redo and local project persistence
+- `js/worksheet-architecture.js` — purposeful sections, block patterns, working-space suggestions and style presets
+- `js/worksheet-versions.js` — sparse inherited pupil, teacher and answer versions
+- `js/number-variation.js` — constraint-safe variations for supported question families
+- `js/pagination.js` — fixed A4 geometry, whole-block pagination and controlled compact rows
 - `service-worker.js` — offline application shell
 - `tests/` — deterministic Build 1 and Build 2 verification sets
 
@@ -46,7 +49,7 @@ The deployed project path is:
 
 `https://6wyk5wz8rf-star.github.io/Maths-worksheet/`
 
-Use the trailing slash: GitHub Pages redirects the slashless path to it. The service worker pre-caches the application shell and uses a Build 2 cache namespace, so a new online visit refreshes the installed offline shell after deployment. Bump that namespace whenever a release changes the shell or adds a local module.
+Use the trailing slash: GitHub Pages redirects the slashless path to it. The service worker pre-caches the application shell and uses a Build 3 cache namespace, so a new online visit refreshes the installed offline shell after deployment. Bump that namespace whenever a release changes the shell or adds a local module.
 
 ## Privacy
 

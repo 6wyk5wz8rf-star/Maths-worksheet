@@ -1,7 +1,7 @@
 // Change this namespace for every release that changes the offline shell.
 // Keeping it separate from the repository name means an existing iPad install
-// receives the complete Build 2 shell instead of retaining Build 1 assets.
-const CACHE = 'maths-page-studio-build-2-v1';
+// receives the complete Build 3 shell instead of retaining an earlier build.
+const CACHE = 'maths-page-studio-build-3-v1';
 const SHELL = [
   './',
   './index.html',
@@ -14,6 +14,9 @@ const SHELL = [
   './js/model-registry.js',
   './js/model-renderers.js',
   './js/build2-model-renderers.js',
+  './js/worksheet-architecture.js',
+  './js/worksheet-versions.js',
+  './js/number-variation.js',
   './js/state.js',
   './js/pagination.js',
   './assets/icon.svg',

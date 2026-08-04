@@ -27,7 +27,7 @@
       <nav class="stage-nav" aria-label="Worksheet stages">
         <button type="button" class="stage-step" data-stage-target="paste"><span>1</span>Paste</button>
         <button type="button" class="stage-step" data-stage-target="check"><span>2</span>Check</button>
-        <button type="button" class="stage-step" data-stage-target="make"><span>3</span>Make</button>
+        <button type="button" class="stage-step" data-stage-target="make"><span>3</span>Compose</button>
         <button type="button" class="stage-step" data-stage-target="print"><span>4</span>Print</button>
       </nav>
 
@@ -91,6 +91,19 @@
           <button value="cancel" class="close-button" aria-label="Close page settings">×</button>
         </div>
         <div id="settings-content"></div>
+      </form>
+    </dialog>
+
+    <dialog id="versions-dialog" class="modal versions-modal">
+      <form method="dialog">
+        <div class="modal-heading">
+          <div>
+            <span class="eyebrow">One worksheet, purposeful versions</span>
+            <h2>Versions</h2>
+          </div>
+          <button value="cancel" class="close-button" aria-label="Close worksheet versions">×</button>
+        </div>
+        <div id="versions-content"></div>
       </form>
     </dialog>
 

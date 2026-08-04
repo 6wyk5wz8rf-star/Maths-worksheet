@@ -25,6 +25,15 @@ import {
   createId,
 } from './state.js';
 import { paginateWorksheet, mmToPx } from './pagination.js';
+import {
+  SECTION_ROLES,
+  STYLE_PRESETS,
+  WORKSHEET_PURPOSES,
+  suggestNewQuestionOrder,
+  suggestWorksheetArchitecture,
+} from './worksheet-architecture.js';
+import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js';
+import { createSafeNumberVariation } from './number-variation.js';
 
 const SAMPLE_TEXT = `Place value
 
@@ -49,10 +58,44 @@ const toastRegion = document.querySelector('#toast-region');
 const confirmDialog = document.querySelector('#confirm-dialog');
 const projectDialog = document.querySelector('#project-dialog');
 const settingsDialog = document.querySelector('#settings-dialog');
+const versionsDialog = document.querySelector('#versions-dialog');
 
 const recovered = loadCurrentProject();
 const initialWorksheet = recovered ?? createWorksheet();
 let store = createStore(initialWorksheet, { autosave: true, autosaveDelay: 140, saveInitial: Boolean(recovered) });
+// Keep Build 2's store as the master persistence/history source.  The UI sees
+// a resolved version, while ordinary edits are recorded as sparse overrides
+// whenever a non-master version is active.
+const masterGetState = store.getState.bind(store);
+const masterDispatch = store.dispatch.bind(store);
+const MASTER_ACTIONS = new Set([
+  'worksheet/set-active-version',
+  'worksheet/create-version',
+  'worksheet/update-version',
+  'worksheet/remove-version',
+  'worksheet/reset-version-block',
+  'worksheet/apply-version-action',
+]);
+function masterWorksheet() {
+  return masterGetState();
+}
+function activeWorksheet() {
+  const master = masterWorksheet();
+  return resolveWorksheetVersion(master, master.versions?.activeId ?? 'master');
+}
+function dispatchMaster(action) {
+  return masterDispatch(action);
+}
+function dispatchActive(action) {
+  const master = masterWorksheet();
+  const activeId = master.versions?.activeId ?? 'master';
+  if (activeId !== 'master' && !MASTER_ACTIONS.has(action.type)) {
+    return masterDispatch(worksheetActions.applyVersionAction(activeId, action));
+  }
+  return masterDispatch(action);
+}
+store.getState = activeWorksheet;
+store.dispatch = dispatchActive;
 const rememberedStage = readStage();
 let ui = {
   stage: rememberedStage === 'check' && initialWorksheet.blocks.length
@@ -70,6 +113,7 @@ let ui = {
   editingInterpretation: false,
   inspectorOpen: false,
   navigatorOpen: false,
+  comparisonVersionId: 'master',
   dragging: null,
   lastPagination: null,
 };
@@ -194,11 +238,22 @@ function parsedItemsToBlocks(parsed) {
     const kind = item.type === 'section-heading' ? 'heading' : item.type === 'shared-instruction' ? 'instruction' : 'question';
     const extracted = item.mathInfo ?? (kind === 'question' ? extractMathInfo(item.displayText) : {});
     return createQuestionBlock({
+      id: item.id,
       kind,
       originalText: item.originalText,
       displayText: item.displayText,
       marks: item.marks,
+      number: item.questionNumber,
+      section: item.sectionId,
       extracted: { ...extracted, sourceLabel: item.sourceLabel ?? null, sourceMarker: item.sourceMarker ?? null },
+      source: {
+        range: item.sourceRange,
+        label: item.sourceLabel,
+        marker: item.sourceMarker,
+        sharedInstructionId: item.sharedInstructionId,
+        markText: item.markText,
+        subparts: item.subparts,
+      },
       response: kind === 'question' ? responseForQuestion({ ...item, kind }, store.getState().intent) : { type: 'none', size: 'compact' },
       layout: { size: kind === 'question' ? 'standard' : 'compact', keepWithNext: kind !== 'question' },
     });
@@ -296,7 +351,7 @@ function reanalyseCurrentBlock(options = {}) {
 }
 
 function buildFirstDraft() {
-  const worksheet = store.getState();
+  const worksheet = masterWorksheet();
   const blocks = worksheet.blocks.map((block) => {
     if (block.kind !== 'question') return block;
     const match = matchForBlock(block, worksheet);
@@ -333,15 +388,34 @@ function buildFirstDraft() {
       warnings,
     };
   });
-  store.dispatch(worksheetActions.replaceBlocks(blocks));
+  const structured = suggestWorksheetArchitecture(blocks, {
+    purpose: worksheet.purpose ?? worksheet.intent,
+    idFactory: (prefix) => createId(prefix),
+    forceSuggestions: true,
+  });
+  dispatchMaster(worksheetActions.replaceBlocks(structured.blocks));
+  dispatchMaster(worksheetActions.updateArchitecture(structured.architecture));
+  dispatchMaster(worksheetActions.applyStylePreset(structured.architecture.stylePreset));
   ui.selectedId = blocks.find((block) => block.kind === 'question')?.id ?? blocks[0]?.id ?? null;
   ui.stage = 'make';
   clearDraft();
   render();
 }
 
+function applySuggestedOrder() {
+  const worksheet = masterWorksheet();
+  const ordered = suggestNewQuestionOrder(worksheet.blocks);
+  const unchanged = ordered.every((block, index) => block.id === worksheet.blocks[index]?.id);
+  if (unchanged) {
+    toast('The current order already follows the suggested progression.');
+    return;
+  }
+  dispatchMaster(worksheetActions.replaceBlocks(ordered));
+  toast('Suggested order applied. Your original wording and every question remain intact.');
+}
+
 function beginCheck() {
-  const raw = ui.rawDraft.trim() ? ui.rawDraft : store.getState().originalImport.rawText;
+  const raw = ui.rawDraft.trim() ? ui.rawDraft : masterWorksheet().originalImport.rawText;
   if (!raw.trim()) {
     toast('Paste at least one question first.', 'warning');
     document.querySelector('#question-paste')?.focus();
@@ -352,8 +426,9 @@ function beginCheck() {
     toast('I could not find a clear question yet. Check the pasted text.', 'warning');
     return;
   }
-  store.dispatch(worksheetActions.setOriginalImport(raw, { importedAt: new Date().toISOString(), source: 'plain-text' }));
-  store.dispatch(worksheetActions.replaceBlocks(parsedItemsToBlocks(parsed)));
+  dispatchMaster(worksheetActions.setOriginalImport(raw, { importedAt: new Date().toISOString(), source: 'plain-text' }));
+  dispatchMaster(worksheetActions.replaceBlocks(parsedItemsToBlocks(parsed)));
+  dispatchMaster(worksheetActions.setActiveVersion('master'));
   ui.stage = 'check';
   ui.editingId = null;
   render();
@@ -383,11 +458,18 @@ function renderPaste() {
   </section>`;
 }
 
+function humanPurpose(value) {
+  return String(value).replaceAll('-', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 function renderIntent(worksheet) {
-  return `<div>
-    <div class="intent-panel" role="group" aria-label="Worksheet intent">
-      ${['practice', 'homework', 'assessment'].map((intent) => `<button type="button" class="intent-option ${worksheet.intent === intent ? 'is-selected' : ''}" data-action="set-intent" data-value="${intent}" aria-pressed="${worksheet.intent === intent}">${intent[0].toUpperCase() + intent.slice(1)}</button>`).join('')}
-    </div>
+  const purpose = worksheet.purpose ?? worksheet.intent ?? 'practice';
+  return `<div class="purpose-panel">
+    <label for="worksheet-purpose">Worksheet purpose</label>
+    <select id="worksheet-purpose" data-role="worksheet-purpose">
+      ${WORKSHEET_PURPOSES.map((value) => `<option value="${value}" ${purpose === value ? 'selected' : ''}>${humanPurpose(value)}</option>`).join('')}
+    </select>
+    <span>Sets sensible structure; you can still adjust every page.</span>
   </div>`;
 }
 
@@ -452,6 +534,7 @@ function renderCheck() {
       <div>
         <div class="check-summary"><strong>${questionCount}</strong> ${questionCount === 1 ? 'question' : 'questions'} ready</div>
         <button type="button" class="ghost" data-action="restore-original">Restore original paste</button>
+        <button type="button" class="ghost" data-action="suggest-new-order">Suggest a new order</button>
       </div>
       <button type="button" class="primary" data-action="make-worksheet">Make my worksheet <span aria-hidden="true">→</span></button>
     </div>
@@ -669,20 +752,64 @@ function renderResponseControls(block) {
   const options = [
     ['none', 'None'],
     ['short-answer', 'Answer line'],
-    ['writing-lines', 'Writing lines'],
-    ['squared-grid', 'Squared grid'],
-    ['open-box', 'Open box'],
-    ['model-completion', 'Model space'],
+    ['answer-box', 'Answer box'],
+    ['calculation-area', 'Calculation area'],
+    ['squared-working', 'Squared working'],
+    ['lined-explanation', 'Explain in lines'],
+    ['unlined-thinking', 'Thinking space'],
+    ['two-methods', 'Show two methods'],
+    ['prove-it', 'Prove it space'],
+    ['table-completion', 'Table completion'],
+    ['diagram-construction', 'Diagram or graph'],
+    ['labelled-steps', 'Labelled steps'],
+    ['rough-working', 'Rough working'],
+    ['model-completion', 'Pupil completion model'],
   ];
+  const size = ({ compact: 'small', standard: 'medium', generous: 'large' })[response.size] ?? response.size ?? 'medium';
   return `<section class="inspector-section">
     <h3>Pupil response space</h3>
+    ${response.suggested ? `<p class="field-hint">Suggested: ${escapeHtml(options.find(([value]) => value === response.type)?.[1] ?? 'working space')}</p>` : ''}
     <div class="field full">
       <label for="response-type">Space type</label>
       <select id="response-type" data-role="response-type">${options.map(([value, label]) => `<option value="${value}" ${response.type === value ? 'selected' : ''}>${label}</option>`).join('')}</select>
     </div>
     <div class="choice-grid three" style="margin-top:8px">
-      ${['compact', 'standard', 'generous'].map((value) => `<button type="button" class="choice-button ${response.size === value ? 'is-selected' : ''}" data-action="set-response-size" data-value="${value}">${humanOption(value)}</button>`).join('')}
+      ${['small', 'medium', 'large'].map((value) => `<button type="button" class="choice-button ${size === value ? 'is-selected' : ''}" data-action="set-response-size" data-value="${value}">${humanOption(value)}</button>`).join('')}
     </div>
+    ${response.type !== 'none' ? `<div class="field" style="margin-top:8px"><label for="response-custom-rows">Custom rows <span class="field-hint">(optional)</span></label><input id="response-custom-rows" data-role="response-custom-rows" type="number" min="0" max="14" value="${Number(response.customRows) || ''}" placeholder="Use the size above"></div>` : ''}
+    ${['lined-explanation', 'prove-it', 'writing-lines'].includes(response.type) ? `<div class="field" style="margin-top:8px"><label for="response-lines">Writing lines</label><input id="response-lines" data-role="response-lines" type="number" min="1" max="12" value="${Number(response.lines) || 4}"></div>` : ''}
+    ${['table-completion', 'diagram-construction', 'labelled-steps'].includes(response.type) ? `<div class="field" style="margin-top:8px"><label for="response-rows">Working rows</label><input id="response-rows" data-role="response-rows" type="number" min="1" max="14" value="${Number(response.rows) || 5}"></div>` : ''}
+  </section>`;
+}
+
+function renderCompositionControls(block, worksheet) {
+  const composition = block.composition ?? {};
+  const patterns = [
+    ['compact-question', 'Compact question'],
+    ['question-with-working', 'Question with working'],
+    ['question-with-model', 'Question with model'],
+    ['large-model', 'Question with large model'],
+    ['reasoning', 'Reasoning question'],
+    ['problem-solving', 'Problem-solving question'],
+    ['compare-methods', 'Compare two methods'],
+    ['worked-example', 'Worked example'],
+    ['pupil-completion', 'Pupil completion model'],
+    ['data', 'Data question'],
+    ['multi-part', 'Multi-part question'],
+    ['challenge', 'Challenge question'],
+  ];
+  const currentSection = block.section ?? '';
+  const sections = worksheet.architecture?.sections ?? [];
+  return `<section class="inspector-section">
+    <h3>Question block</h3>
+    <div class="field"><label for="block-pattern">Structure</label><select id="block-pattern" data-role="block-pattern">${patterns.map(([value, label]) => `<option value="${value}" ${composition.pattern === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+    <div class="field" style="margin-top:8px"><label for="manual-number">Manual number <span class="field-hint">(for example 4a)</span></label><input id="manual-number" data-role="manual-number" value="${escapeAttr(block.manualNumber ?? '')}" placeholder="Automatic"></div>
+    <div class="choice-grid three" style="margin-top:8px" role="group" aria-label="Block footprint">
+      ${[['compact', 'Compact'], ['standard', 'Standard'], ['spacious', 'Spacious'], ['half', 'Half width'], ['full', 'Full width'], ['page', 'Full page']].map(([value, label]) => `<button type="button" class="choice-button ${composition.footprint === value ? 'is-selected' : ''}" data-action="set-footprint" data-value="${value}">${label}</button>`).join('')}
+    </div>
+    ${sections.length ? `<div class="field" style="margin-top:8px"><label for="block-section">Section</label><select id="block-section" data-role="block-section">${sections.map((section) => `<option value="${escapeAttr(section.id)}" ${currentSection === section.id ? 'selected' : ''}>${escapeHtml(section.name)}</option>`).join('')}</select></div>` : ''}
+    <div class="switch-row"><span>Keep question together</span><label class="switch"><input type="checkbox" data-role="keep-together" ${composition.keepTogether !== false ? 'checked' : ''}><span></span></label></div>
+    <div class="switch-row"><span>Keep with next block</span><label class="switch"><input type="checkbox" data-role="keep-with-next" ${composition.keepWithNext || block.layout?.keepWithNext ? 'checked' : ''}><span></span></label></div>
   </section>`;
 }
 
@@ -793,24 +920,40 @@ function renderInspector(worksheet) {
   const block = selectedBlock(worksheet);
   if (!block) return `<div class="inspector-empty">${icon('question')}<p>Select a question to adjust its model and working space.</p></div>`;
   if (block.kind !== 'question') {
+    const section = (worksheet.architecture?.sections ?? []).find((item) => item.id === block.section) ?? {};
+    const sectionIndex = (worksheet.architecture?.sections ?? []).findIndex((item) => item.id === block.section);
     return `<div class="inspector-content">
       <div class="field"><label for="selected-display-text">Printed wording</label><textarea id="selected-display-text" data-role="question-display">${escapeHtml(block.displayText)}</textarea></div>
-      <section class="inspector-section"><h3>${block.kind === 'heading' ? 'Section heading' : 'Shared instruction'}</h3><p>This stays with the next question and does not receive a model.</p></section>
+      ${block.kind === 'heading' ? `<section class="inspector-section"><h3>Section structure</h3><div class="field"><label for="section-role">Role</label><select id="section-role" data-role="section-role">${SECTION_ROLES.map((role) => `<option value="${role}" ${block.sectionMeta?.role === role ? 'selected' : ''}>${humanPurpose(role)}</option>`).join('')}</select></div><div class="field" style="margin-top:8px"><label for="section-layout">Layout</label><select id="section-layout" data-role="section-layout"><option value="flow" ${section.layout === 'flow' ? 'selected' : ''}>Flow</option><option value="rows" ${section.layout === 'rows' ? 'selected' : ''}>Rows for compact questions</option><option value="deliberate-pages" ${section.layout === 'deliberate-pages' ? 'selected' : ''}>Deliberate pages</option></select></div><div class="switch-row"><span>Start section on a new page</span><label class="switch"><input type="checkbox" data-role="section-new-page" ${section.startOnNewPage ? 'checked' : ''}><span></span></label></div><div class="choice-grid" style="margin-top:8px"><button type="button" class="choice-button" data-action="move-section" data-id="${escapeAttr(block.section)}" data-direction="up" ${sectionIndex <= 0 ? 'disabled' : ''}>↑ Move section</button><button type="button" class="choice-button" data-action="move-section" data-id="${escapeAttr(block.section)}" data-direction="down" ${sectionIndex < 0 || sectionIndex >= (worksheet.architecture?.sections?.length ?? 0) - 1 ? 'disabled' : ''}>↓ Move section</button></div><button type="button" class="ghost full-width" data-action="remove-section" data-id="${escapeAttr(block.section)}" style="margin-top:8px">Remove section, keep questions</button></section>` : `<section class="inspector-section"><h3>Shared instruction</h3><p>This stays with the next question and does not receive a model.</p></section>`}
       ${renderBlockOrderControls(block, worksheet)}
     </div>`;
   }
+  const activeOverride = worksheet.activeVersion?.id !== 'master'
+    && Boolean(worksheet.activeVersion?.overrides?.blockPatches?.[block.id]);
   return `<div class="inspector-content">
     <div class="field" style="margin-bottom:14px"><label for="selected-display-text">Printed question wording</label><textarea id="selected-display-text" data-role="question-display">${escapeHtml(block.displayText)}</textarea></div>
     ${renderInterpretationControls(block, worksheet)}
+    ${renderCompositionControls(block, worksheet)}
     ${block.model && !ui.browseModels ? renderAttachedModel(block, worksheet) : renderModelChoices(block, worksheet)}
     ${renderResponseControls(block)}
+    <section class="inspector-section">
+      <h3>Optional support</h3>
+      <div class="field"><label for="block-hint">Brief hint</label><input id="block-hint" data-role="block-composition-text" data-key="hint" value="${escapeAttr(block.composition?.hint ?? '')}" placeholder="Only where it helps"></div>
+      <div class="field"><label for="block-stem">Sentence stem</label><input id="block-stem" data-role="block-composition-text" data-key="sentenceStem" value="${escapeAttr(block.composition?.sentenceStem ?? '')}" placeholder="I know this because…"></div>
+      <div class="field"><label for="block-vocabulary">Vocabulary cue</label><input id="block-vocabulary" data-role="block-composition-text" data-key="vocabulary" value="${escapeAttr((block.composition?.vocabulary ?? []).join(', '))}" placeholder="e.g. value, interval"></div>
+      <button type="button" class="ghost full-width" data-action="vary-numbers" style="margin-top:8px">Create a safe value variation</button>
+    </section>
     <section class="inspector-section">
       <h3>Teacher version</h3>
       <div class="field-grid">
         <div class="field full"><label for="teacher-answer">Answer (only if known)</label><input id="teacher-answer" data-role="teacher-answer" value="${escapeAttr(block.teacher.answer ?? '')}" placeholder="Leave unresolved if uncertain"></div>
+        <div class="field full"><label for="teacher-method">Expected method</label><input id="teacher-method" data-role="teacher-field" data-key="expectedMethod" value="${escapeAttr(block.teacher.expectedMethod ?? '')}" placeholder="Optional"></div>
+        <div class="field full"><label for="teacher-misconception">Common misconception</label><input id="teacher-misconception" data-role="teacher-field" data-key="misconception" value="${escapeAttr(block.teacher.misconception ?? '')}" placeholder="Optional"></div>
         <div class="field full"><label for="teacher-notes">Short note</label><textarea id="teacher-notes" data-role="teacher-notes" placeholder="Optional teaching note">${escapeHtml(block.teacher.notes ?? '')}</textarea></div>
+        <div class="field full"><label for="teacher-marking">Marking note</label><textarea id="teacher-marking" data-role="teacher-field" data-key="markingNote" placeholder="Optional">${escapeHtml(block.teacher.markingNote ?? '')}</textarea></div>
       </div>
     </section>
+    ${activeOverride ? `<button type="button" class="ghost full-width" data-action="reset-version-block" data-id="${block.id}">Reset this question to Standard</button>` : ''}
     ${renderBlockOrderControls(block, worksheet)}
   </div>`;
 }
@@ -831,8 +974,9 @@ function renderBlockOrderControls(block, worksheet) {
 }
 
 function renderNavigator(worksheet, mobile = false) {
+  const pagination = ui.lastPagination ?? paginateWorksheet(worksheet, { outputView: worksheet.outputView });
   return `<div class="${mobile ? 'mobile-navigator-sheet' : 'question-navigator'} ${mobile && ui.navigatorOpen ? 'is-open' : ''}">
-    <div class="panel-header"><h2>Questions</h2><span class="panel-count">${worksheet.blocks.filter((block) => block.kind === 'question').length}</span>${mobile ? '<button type="button" class="tool-button" data-action="close-mobile-panels">×</button>' : ''}</div>
+    <div class="panel-header"><h2>Questions</h2><span class="panel-count">${worksheet.blocks.filter((block) => block.kind === 'question').length}</span><button type="button" class="tool-button" data-action="add-section" aria-label="Add a section">＋</button>${mobile ? '<button type="button" class="tool-button" data-action="close-mobile-panels">×</button>' : ''}</div>
     <div class="navigator-list">
       ${worksheet.blocks.map((block) => {
         const warning = block.warnings?.length;
@@ -841,6 +985,10 @@ function renderNavigator(worksheet, mobile = false) {
           <span class="nav-copy"><strong>${escapeHtml(block.displayText)}</strong><span class="nav-meta"><span class="nav-dot ${warning ? 'warning' : block.model ? '' : 'none'}"></span>${block.kind !== 'question' ? humanOption(block.kind) : block.model ? getModelDefinition(block.model.family)?.name : 'No model'}</span></span>
         </button>`;
       }).join('')}
+    </div>
+    <div class="page-overview" aria-label="Page overview">
+      <span>Pages</span>
+      <div>${pagination.pages.map((page) => `<button type="button" class="${page.warnings?.length ? 'has-warning' : ''}" data-action="jump-page" data-page="${page.number}" aria-label="Go to page ${page.number}${page.warnings?.length ? ', has print checks' : ''}">${page.number}</button>`).join('')}</div>
     </div>
   </div>`;
 }
@@ -855,33 +1003,50 @@ function renderResponseSpace(block, placement) {
   if (response.type === 'none') return '';
   const style = responseHeightStyle(placement);
   if (response.type === 'short-answer' || response.type === 'short-line') return `<div class="response-space response-line" style="${style}" aria-label="Answer line"></div>`;
-  if (response.type === 'writing-lines') {
-    const count = Math.max(2, Number(response.lines) || (response.size === 'generous' ? 7 : response.size === 'compact' ? 3 : 5));
-    return `<div class="response-space response-lines" style="${style}" aria-label="Writing lines">${Array.from({ length: count }, () => '<span></span>').join('')}</div>`;
+  if (response.type === 'answer-box') return `<div class="response-space response-answer-box" style="${style}" aria-label="Answer box"></div>`;
+  if (['writing-lines', 'lined-explanation', 'prove-it'].includes(response.type)) {
+    const count = Math.max(2, Number(response.customRows) || Number(response.lines) || (response.size === 'generous' ? 7 : response.size === 'compact' ? 3 : 5));
+    return `<div class="response-space response-lines ${response.type === 'prove-it' ? 'response-prove-it' : ''}" style="${style}" aria-label="Writing lines">${response.type === 'prove-it' ? '<small>Evidence or counterexample</small>' : ''}${Array.from({ length: count }, () => '<span></span>').join('')}</div>`;
   }
-  if (response.type === 'squared-grid') return `<div class="response-space response-grid" style="${style}" aria-label="Squared working grid"></div>`;
+  if (response.type === 'squared-grid' || response.type === 'squared-working') return `<div class="response-space response-grid" style="${style}" aria-label="Squared working grid"></div>`;
+  if (response.type === 'calculation-area' || response.type === 'rough-working') return `<div class="response-space response-calculation ${response.type === 'rough-working' ? 'response-rough' : ''}" style="${style}" aria-label="Calculation working area"><span>${escapeHtml(response.label || (response.type === 'rough-working' ? 'Rough working' : 'Show your method'))}</span></div>`;
+  if (response.type === 'unlined-thinking') return `<div class="response-space response-thinking" style="${style}" aria-label="Open thinking space"><span>${escapeHtml(response.label || 'Show your thinking')}</span></div>`;
+  if (response.type === 'two-methods') return `<div class="response-space response-two-methods" style="${style}" aria-label="Two method spaces"><div><small>Method 1</small></div><div><small>Method 2</small></div></div>`;
+  if (response.type === 'table-completion') {
+    const rows = Math.max(2, Number(response.rows) || 4);
+    const columns = Math.max(2, Math.min(5, Number(response.columns) || 3));
+    return `<div class="response-space response-table" style="${style}" aria-label="Table completion space">${Array.from({ length: rows }, () => `<div>${Array.from({ length: columns }, () => '<span></span>').join('')}</div>`).join('')}</div>`;
+  }
+  if (response.type === 'diagram-construction') return `<div class="response-space response-diagram" style="${style}" aria-label="Diagram construction space"><span>${escapeHtml(response.label || 'Construct your diagram')}</span></div>`;
+  if (response.type === 'labelled-steps') {
+    const rows = Math.max(2, Number(response.rows) || 4);
+    return `<div class="response-space response-steps" style="${style}" aria-label="Labelled steps">${Array.from({ length: rows }, (_, index) => `<div><b>${index + 1}</b><span></span></div>`).join('')}</div>`;
+  }
   if (response.type === 'model-completion') return `<div class="response-space response-model-space" style="${style}" aria-label="Model completion space"></div>`;
   return `<div class="response-space response-box" style="${style}" aria-label="Open working box"></div>`;
 }
 
 function modelForOutput(block, outputView) {
-  if (outputView === 'teacher' && block.teacher?.completedModel) return block.teacher.completedModel;
+  if ((outputView === 'teacher' || outputView === 'answer') && block.teacher?.completedModel) return block.teacher.completedModel;
   return block.model;
 }
 
-function renderQuestionCore(block, placement, outputView) {
+function renderQuestionCore(block, placement, outputView, worksheet) {
   const model = modelForOutput(block, outputView);
   const position = model?.position ?? block.layout?.modelPosition ?? 'beneath';
   const number = block.number == null ? '' : `<span class="question-number">${escapeHtml(block.number)}.</span>`;
-  const marks = block.marks && !textIncludesMarks(block.displayText) ? `<span class="question-marks">[${block.marks} ${block.marks === 1 ? 'mark' : 'marks'}]</span>` : '';
+  const marks = worksheet.settings.showMarks && block.marks && !textIncludesMarks(block.displayText) ? `<span class="question-marks">[${block.marks} ${block.marks === 1 ? 'mark' : 'marks'}]</span>` : '';
   const question = `<div class="question-row">${number}<p class="question-copy">${marks}${escapeHtml(block.displayText)}</p></div>`;
-  if (!model) return question;
+  const support = outputView === 'pupil' && (block.composition?.hint || block.composition?.sentenceStem || block.composition?.vocabulary?.length)
+    ? `<div class="pupil-support">${block.composition?.hint ? `<span>${icon('question')} ${escapeHtml(block.composition.hint)}</span>` : ''}${block.composition?.sentenceStem ? `<span><strong>Stem:</strong> ${escapeHtml(block.composition.sentenceStem)}</span>` : ''}${block.composition?.vocabulary?.length ? `<span><strong>Words:</strong> ${escapeHtml(block.composition.vocabulary.join(', '))}</span>` : ''}</div>`
+    : '';
+  if (!model) return `${question}${support}`;
   const modelHeight = placement.measurement?.breakdown?.modelMm ?? 28;
   const rendered = renderModel(model, { intent: store.getState().intent, outputView, instanceId: `${block.id}-${outputView}` });
   const slot = `<div class="model-slot position-${position}" style="height:${modelHeight}mm" data-model-slot="${block.id}" aria-label="Attached ${escapeAttr(getModelDefinition(model.family)?.name ?? 'mathematical model')}">${rendered}</div>`;
-  if (position === 'above') return `${slot}${question}`;
-  if (position === 'beside') return `<div class="question-layout-beside">${question}${slot}</div>`;
-  return `${question}${slot}`;
+  if (position === 'above') return `${slot}${question}${support}`;
+  if (position === 'beside') return `<div class="question-layout-beside">${question}${slot}</div>${support}`;
+  return `${question}${slot}${support}`;
 }
 
 function renderWorksheetBlock(block, placement, worksheet, outputView) {
@@ -891,40 +1056,69 @@ function renderWorksheetBlock(block, placement, worksheet, outputView) {
   const height = placement.heightMm;
   const style = `left:${left}mm;top:${top}mm;width:${width}mm;height:${height}mm;--block-pad:${placement.measurement?.breakdown?.paddingMm ?? 3}mm`;
   if (block.kind === 'heading') {
-    return `<section class="question-block section-block ${ui.selectedId === block.id ? 'is-selected' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}" draggable="true">${escapeHtml(block.displayText)}</section>`;
+    const role = block.sectionMeta?.role ?? 'custom';
+    const roleIcon = { fluency: '•', 'guided-practice': '→', reasoning: '↗', 'problem-solving': '◇', challenge: '+', reflection: '↺' }[role] ?? '§';
+    return `<section class="question-block section-block section-${escapeAttr(role)} ${ui.selectedId === block.id ? 'is-selected' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}"><span aria-hidden="true">${roleIcon}</span>${escapeHtml(block.displayText)}</section>`;
   }
   if (block.kind === 'instruction') {
-    return `<section class="question-block instruction-block ${ui.selectedId === block.id ? 'is-selected' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}" draggable="true"><p class="question-copy">${escapeHtml(block.displayText)}</p></section>`;
+    return `<section class="question-block instruction-block ${ui.selectedId === block.id ? 'is-selected' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}"><p class="question-copy">${escapeHtml(block.displayText)}</p></section>`;
   }
   const warnings = placement.measurement?.warnings ?? [];
-  const teacher = outputView === 'teacher' && (block.teacher.answer != null || block.teacher.notes)
-    ? `<div class="teacher-note">${block.teacher.answer != null && String(block.teacher.answer).length ? `<strong>Answer:</strong> ${escapeHtml(block.teacher.answer)}${block.teacher.notes ? '<br>' : ''}` : ''}${block.teacher.notes ? escapeHtml(block.teacher.notes) : ''}</div>`
+  const teacher = outputView === 'teacher' && (block.teacher.answer != null || block.teacher.notes || block.teacher.expectedMethod || block.teacher.misconception || block.teacher.markingNote)
+    ? `<div class="teacher-note">${[
+      block.teacher.answer != null && String(block.teacher.answer).length ? `<strong>Answer:</strong> ${escapeHtml(block.teacher.answer)}` : '',
+      block.teacher.expectedMethod ? `<strong>Expected method:</strong> ${escapeHtml(block.teacher.expectedMethod)}` : '',
+      block.teacher.misconception ? `<strong>Watch for:</strong> ${escapeHtml(block.teacher.misconception)}` : '',
+      block.teacher.notes ? escapeHtml(block.teacher.notes) : '',
+      block.teacher.markingNote ? `<strong>Marking:</strong> ${escapeHtml(block.teacher.markingNote)}` : '',
+    ].filter(Boolean).join('<br>')}</div>`
     : '';
-  return `<article class="question-block ${ui.selectedId === block.id ? 'is-selected' : ''} ${warnings.some((warning) => warning.code === 'block-overcrowded') ? 'is-overcrowded' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}" draggable="true">
-    ${renderQuestionCore(block, placement, outputView)}
+  const answer = outputView === 'answer' && block.teacher?.answer != null && String(block.teacher.answer).length
+    ? `<div class="answer-note"><strong>Answer:</strong> ${escapeHtml(block.teacher.answer)}</div>`
+    : '';
+  return `<article class="question-block ${ui.selectedId === block.id ? 'is-selected' : ''} ${warnings.some((warning) => warning.code === 'block-overcrowded') ? 'is-overcrowded' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}">
+    ${renderQuestionCore(block, placement, outputView, worksheet)}
     ${renderResponseSpace(block, placement)}
     ${teacher}
-    <div class="block-screen-tools screen-only"><button type="button" data-action="select-block" data-id="${block.id}" aria-label="Edit question ${block.number ?? ''}">${icon('edit')}</button></div>
+    ${answer}
+    <div class="block-screen-tools screen-only"><button type="button" class="block-drag-handle" draggable="true" data-drag-id="${block.id}" aria-label="Drag question ${block.number ?? ''}">${icon('handle')}</button><button type="button" data-action="select-block" data-id="${block.id}" aria-label="Edit question ${block.number ?? ''}">${icon('edit')}</button></div>
   </article>`;
 }
 
 function worksheetHeader(worksheet, geometry) {
   const settings = worksheet.settings;
+  const headerFields = worksheet.architecture?.header?.fields ?? {};
+  const headerLayout = worksheet.architecture?.header?.layout ?? 'standard';
   const fields = [
     settings.showNameField ? 'Name' : null,
     settings.showClassField ? (worksheet.metadata.className || 'Class') : null,
     settings.showDateField ? 'Date' : null,
+    worksheet.metadata.teacher && headerFields.teacher === true ? `Teacher: ${worksheet.metadata.teacher}` : null,
+    settings.showMarks && settings.totalMarks ? `Score: ____ / ${settings.totalMarks}` : null,
   ].filter(Boolean);
-  return `<header class="worksheet-header" style="position:absolute;left:${geometry.margins.left}mm;top:${geometry.margins.top}mm;width:${geometry.contentWidthMm}mm">
+  const details = [
+    worksheet.metadata.topic && headerFields.topic !== false ? `<span class="worksheet-topic">${escapeHtml(worksheet.metadata.topic)}</span>` : '',
+    worksheet.metadata.learningIntention && headerFields.learningIntention !== false ? `<span><strong>Learning intention:</strong> ${escapeHtml(worksheet.metadata.learningIntention)}</span>` : '',
+    worksheet.metadata.successCriteria && headerFields.successCriteria === true ? `<span><strong>Success criteria:</strong> ${escapeHtml(worksheet.metadata.successCriteria)}</span>` : '',
+    worksheet.metadata.shortInstruction && headerFields.shortInstruction !== false ? `<span>${escapeHtml(worksheet.metadata.shortInstruction)}</span>` : '',
+  ].filter(Boolean);
+  return `<header class="worksheet-header header-${headerLayout}" style="position:absolute;left:${geometry.margins.left}mm;top:${geometry.margins.top}mm;width:${geometry.contentWidthMm}mm">
     <div class="worksheet-kicker">${escapeHtml(worksheet.intent === 'assessment' ? 'Assessment' : worksheet.intent === 'homework' ? 'Homework' : 'Practice')}</div>
     <h1 class="worksheet-title">${escapeHtml(worksheet.metadata.title || worksheet.metadata.name)}</h1>
-    ${worksheet.metadata.shortInstruction ? `<p class="worksheet-instruction">${escapeHtml(worksheet.metadata.shortInstruction)}</p>` : ''}
+    ${details.length ? `<div class="worksheet-instruction">${details.join('')}</div>` : ''}
     ${fields.length ? `<div class="pupil-fields">${fields.map((field) => `<span class="pupil-field">${escapeHtml(field)}</span>`).join('')}</div>` : ''}
   </header>`;
 }
 
 function worksheetPageClass(worksheet) {
-  const classes = ['worksheet-page', `density-${worksheet.settings.density}`, `typeface-${worksheet.settings.typeface}`];
+  const classes = [
+    'worksheet-page',
+    `density-${worksheet.settings.density}`,
+    `typeface-${worksheet.settings.typeface}`,
+    `section-style-${worksheet.settings.sectionStyle ?? 'line'}`,
+    `body-scale-${worksheet.settings.bodyScale ?? 'standard'}`,
+    `line-weight-${worksheet.settings.lineWeight ?? 'light'}`,
+  ];
   if (worksheet.settings.colorMode === 'monochrome') classes.push('monochrome');
   return classes.join(' ');
 }
@@ -940,7 +1134,7 @@ function renderPage(worksheet, pagination, page, outputView, context = 'editor')
         const block = worksheet.blocks.find((item) => item.id === placement.blockId);
         return block ? renderWorksheetBlock(block, placement, worksheet, outputView) : '';
       }).join('')}
-      ${worksheet.settings.pageNumbers ? `<footer class="worksheet-footer" style="position:absolute;left:${pagination.geometry.margins.left}mm;right:${pagination.geometry.margins.right}mm;bottom:${Math.max(3, pagination.geometry.margins.bottom - 2)}mm"><span>${escapeHtml(worksheet.metadata.title)}</span><span class="page-number">${page.number}</span></footer>` : ''}
+      ${worksheet.settings.pageNumbers ? `<footer class="worksheet-footer" style="position:absolute;left:${pagination.geometry.margins.left}mm;right:${pagination.geometry.margins.right}mm;bottom:${Math.max(3, pagination.geometry.margins.bottom - 2)}mm"><span>${escapeHtml(worksheet.architecture?.footer?.fields?.includes('version-label') ? `${worksheet.metadata.title} · ${worksheet.metadata.versionLabel ?? ''}`.replace(/ · $/, '') : worksheet.metadata.title)}</span><span class="page-number">${page.number}</span></footer>` : ''}
     </section>
   </div>`;
 }
@@ -965,9 +1159,12 @@ function renderMake() {
         <span class="save-state">Saved</span>
       </div>
       <div class="toolbar-group">
+        <button type="button" class="version-chip" data-action="open-versions" aria-label="Open worksheet versions"><span>${escapeHtml(worksheet.activeVersion?.name ?? 'Standard')}</span><small>${worksheet.activeVersionId === 'master' ? 'Master' : 'Version'}</small></button>
+        <span class="toolbar-divider"></span>
         <div class="view-toggle" role="group" aria-label="Output view">
           <button type="button" data-action="set-output-view" data-value="pupil" class="${worksheet.outputView === 'pupil' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'pupil'}">Pupil</button>
           <button type="button" data-action="set-output-view" data-value="teacher" class="${worksheet.outputView === 'teacher' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'teacher'}">Teacher</button>
+          <button type="button" data-action="set-output-view" data-value="answer" class="${worksheet.outputView === 'answer' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'answer'}">Answers</button>
         </div>
         <span class="toolbar-divider"></span>
         <details class="batch-menu">
@@ -1009,7 +1206,7 @@ function renderMake() {
 function collectPrintChecks(worksheet, pagination, outputView) {
   const checks = [];
   const modelWarnings = worksheet.blocks.flatMap((block) => {
-    if (!block.model) return [];
+    if (!modelForOutput(block, outputView)) return [];
     const model = modelForOutput(block, outputView);
     const result = validateRecipe(model, { intent: worksheet.intent });
     return [...result.warnings, ...result.errors].map((warning) => ({ ...warning, blockId: block.id }));
@@ -1020,11 +1217,15 @@ function collectPrintChecks(worksheet, pagination, outputView) {
   checks.push({ warning: worksheet.intent === 'assessment' && answerLeaks > 0 && outputView === 'pupil', text: worksheet.intent === 'assessment' && answerLeaks > 0 && outputView === 'pupil' ? `${answerLeaks} assessment model may reveal assessed thinking.` : 'No unacknowledged answer-reveal risk in this output.' });
   checks.push({ warning: pagination.blocksWithoutResponseSpace.length > 0, text: pagination.blocksWithoutResponseSpace.length ? `${pagination.blocksWithoutResponseSpace.length} question has no meaningful response space.` : 'Every question has a response route or completion model.' });
   checks.push({ warning: modelWarnings.some((warning) => warning.severity === 'error'), text: modelWarnings.some((warning) => warning.severity === 'error') ? 'A model has invalid mathematical values and will show a safety message.' : 'All attached models pass mathematical integrity checks.' });
+  checks.push({ warning: pagination.crowdedPageNumbers?.length > 0, text: pagination.crowdedPageNumbers?.length ? `Page ${pagination.crowdedPageNumbers.join(', ')} is crowded. Reduce working space or move a question.` : 'No page is overcrowded.' });
+  checks.push({ warning: pagination.sparsePageNumbers?.length > 0, text: pagination.sparsePageNumbers?.length ? `Page ${pagination.sparsePageNumbers.join(', ')} has a large unused area.` : 'No accidental sparse page detected.' });
+  checks.push({ warning: pagination.orphanedHeadingBlockIds?.length > 0, text: pagination.orphanedHeadingBlockIds?.length ? 'A section heading is isolated from its question.' : 'Section headings stay with the next block.' });
   return checks;
 }
 
 function renderPrint() {
   const worksheet = store.getState();
+  const master = masterWorksheet();
   const outputView = worksheet.outputView;
   const pagination = paginateWorksheet(worksheet, { outputView });
   ui.lastPagination = pagination;
@@ -1041,6 +1242,7 @@ function renderPrint() {
       <div class="view-toggle" role="group" aria-label="Version to print">
         <button type="button" data-action="set-output-view" data-value="pupil" class="${outputView === 'pupil' ? 'is-selected' : ''}">Pupil version</button>
         <button type="button" data-action="set-output-view" data-value="teacher" class="${outputView === 'teacher' ? 'is-selected' : ''}">Teacher version</button>
+        <button type="button" data-action="set-output-view" data-value="answer" class="${outputView === 'answer' ? 'is-selected' : ''}">Answer version</button>
       </div>
     </div>
     <div class="print-summary-grid" data-screen-only>
@@ -1053,14 +1255,17 @@ function renderPrint() {
       <div class="print-preview-panel">${renderPageStack(worksheet, outputView, 'print-preview')}</div>
       <aside class="print-controls" data-screen-only>
         <div class="print-card">
-          <h2>${outputView === 'teacher' ? 'Teacher version' : 'Pupil version'}</h2>
-          <p>${worksheet.settings.colorMode === 'monochrome' ? 'Monochrome' : 'Colour'} · A4 ${pagination.geometry.page.orientation} · ${pagination.pageCount} ${pagination.pageCount === 1 ? 'page' : 'pages'}</p>
+          <h2>${outputView === 'teacher' ? 'Teacher version' : outputView === 'answer' ? 'Answer version' : 'Pupil version'}</h2>
+          <div class="field" style="margin-top:10px"><label for="print-version">Worksheet version</label><select id="print-version" data-role="print-version">${(master.versions?.items ?? []).map((version) => `<option value="${version.id}" ${version.id === worksheet.activeVersionId ? 'selected' : ''}>${escapeHtml(version.name)}</option>`).join('')}</select></div>
+          <div class="field" style="margin-top:10px"><label for="print-duplex">Print planning</label><select id="print-duplex" data-role="print-duplex"><option value="single-sided" ${worksheet.printSettings?.duplexPlan === 'single-sided' ? 'selected' : ''}>Single-sided</option><option value="double-sided" ${worksheet.printSettings?.duplexPlan === 'double-sided' ? 'selected' : ''}>Double-sided plan</option></select></div>
+          <p style="margin-top:10px">${worksheet.settings.colorMode === 'monochrome' ? 'Monochrome' : 'Colour'} · A4 ${pagination.geometry.page.orientation} · ${pagination.pageCount} ${pagination.pageCount === 1 ? 'page' : 'pages'}</p>
         </div>
         <div class="print-card">
           <h3>Page checks</h3>
           <div class="check-list">${checks.map((item) => `<div class="check-item"><span class="check-icon ${item.warning ? 'warning' : ''}">${item.warning ? '!' : '✓'}</span><span>${escapeHtml(item.text)}</span></div>`).join('')}</div>
         </div>
         <div class="print-card print-action-stack">
+          ${checks.some((item) => item.warning) ? '<button type="button" class="secondary" data-action="apply-print-repair">Apply a safe layout repair</button>' : ''}
           <button type="button" class="primary" data-action="print-now">${icon('print')} Print ${outputView} version</button>
           <button type="button" class="secondary" data-action="go-stage" data-stage="make">Return to editing</button>
           <p class="pdf-note"><span aria-hidden="true">ⓘ</span><span>Choose <strong>Save as PDF</strong> in the browser’s print panel to keep a PDF copy.</span></p>
@@ -1073,39 +1278,104 @@ function renderPrint() {
 function renderSettingsContent() {
   const worksheet = store.getState();
   const settings = worksheet.settings;
+  const architecture = worksheet.architecture ?? {};
+  const headerFields = architecture.header?.fields ?? {};
   document.querySelector('#settings-content').innerHTML = `<div class="settings-grid">
     <section class="settings-group">
       <h3>Worksheet heading</h3>
       <div class="field"><label for="sheet-title">Printed title</label><input id="sheet-title" data-role="metadata-field" data-key="title" value="${escapeAttr(worksheet.metadata.title)}"></div>
+      <div class="field"><label for="sheet-topic">Topic</label><input id="sheet-topic" data-role="metadata-field" data-key="topic" value="${escapeAttr(worksheet.metadata.topic ?? '')}" placeholder="Optional"></div>
+      <div class="field"><label for="sheet-li">Learning intention</label><input id="sheet-li" data-role="metadata-field" data-key="learningIntention" value="${escapeAttr(worksheet.metadata.learningIntention ?? '')}" placeholder="Optional"></div>
+      <div class="field"><label for="sheet-sc">Success criteria</label><input id="sheet-sc" data-role="metadata-field" data-key="successCriteria" value="${escapeAttr(worksheet.metadata.successCriteria ?? '')}" placeholder="Optional"></div>
       <div class="field"><label for="sheet-instruction">Short instruction</label><input id="sheet-instruction" data-role="metadata-field" data-key="shortInstruction" value="${escapeAttr(worksheet.metadata.shortInstruction)}" placeholder="Optional"></div>
       <div class="field"><label for="sheet-class">Class label</label><input id="sheet-class" data-role="metadata-field" data-key="className" value="${escapeAttr(worksheet.metadata.className)}" placeholder="Optional"></div>
+      <div class="field"><label for="sheet-teacher">Teacher label</label><input id="sheet-teacher" data-role="metadata-field" data-key="teacher" value="${escapeAttr(worksheet.metadata.teacher ?? '')}" placeholder="Optional"></div>
+      <div class="field"><label for="header-layout">Header size</label><select id="header-layout" data-role="architecture-select" data-path="header.layout"><option value="compact" ${architecture.header?.layout === 'compact' ? 'selected' : ''}>Compact</option><option value="standard" ${architecture.header?.layout !== 'compact' && architecture.header?.layout !== 'spacious' ? 'selected' : ''}>Standard</option><option value="spacious" ${architecture.header?.layout === 'spacious' ? 'selected' : ''}>Spacious</option></select></div>
       ${[
         ['showNameField', 'Name field'],
         ['showDateField', 'Date field'],
         ['showClassField', 'Class field'],
       ].map(([key, label]) => `<div class="switch-row"><span>${label}</span><label class="switch"><input type="checkbox" data-role="settings-checkbox" data-key="${key}" ${settings[key] ? 'checked' : ''}><span></span></label></div>`).join('')}
+      ${[
+        ['topic', 'Show topic'],
+        ['learningIntention', 'Show learning intention'],
+        ['successCriteria', 'Show success criteria'],
+        ['shortInstruction', 'Show instruction'],
+        ['teacher', 'Show teacher'],
+      ].map(([key, label]) => `<div class="switch-row"><span>${label}</span><label class="switch"><input type="checkbox" data-role="architecture-header-checkbox" data-key="${key}" ${headerFields[key] !== false && (key !== 'successCriteria' || headerFields[key] === true) ? 'checked' : ''}><span></span></label></div>`).join('')}
     </section>
     <section class="settings-group">
       <h3>Page character</h3>
+      <div class="field"><label>Style preset</label><div class="choice-grid">${Object.entries(STYLE_PRESETS).map(([key, preset]) => `<button type="button" class="choice-button ${architecture.stylePreset === key ? 'is-selected' : ''}" data-action="apply-style-preset" data-value="${key}">${escapeHtml(preset.label)}</button>`).join('')}</div></div>
       <div class="field"><label>Accent colour</label><div class="accent-list">${ACCENTS.map((colour) => `<button type="button" class="accent-button ${settings.accentColor === colour ? 'is-selected' : ''}" style="--swatch:${colour}" data-action="set-accent" data-value="${colour}" aria-label="Use ${colour} accent" aria-pressed="${settings.accentColor === colour}"></button>`).join('')}</div></div>
       <div class="field"><label for="colour-mode">Print colour</label><select id="colour-mode" data-role="settings-select" data-key="colorMode"><option value="colour" ${settings.colorMode === 'colour' ? 'selected' : ''}>Colour</option><option value="monochrome" ${settings.colorMode === 'monochrome' ? 'selected' : ''}>Monochrome</option></select></div>
       <div class="field"><label for="typeface">Typeface</label><select id="typeface" data-role="settings-select" data-key="typeface"><option value="system" ${settings.typeface === 'system' ? 'selected' : ''}>Classic maths</option><option value="sans" ${settings.typeface === 'sans' ? 'selected' : ''}>Clear sans</option><option value="rounded" ${settings.typeface === 'rounded' ? 'selected' : ''}>Soft rounded</option></select></div>
+      <div class="field"><label for="body-scale">Body text size</label><select id="body-scale" data-role="settings-select" data-key="bodyScale"><option value="small" ${settings.bodyScale === 'small' ? 'selected' : ''}>Compact</option><option value="standard" ${settings.bodyScale !== 'small' && settings.bodyScale !== 'large' ? 'selected' : ''}>Standard</option><option value="large" ${settings.bodyScale === 'large' ? 'selected' : ''}>Large</option></select></div>
       <div class="field"><label for="density">Spacing</label><select id="density" data-role="settings-select" data-key="density"><option value="compact" ${settings.density === 'compact' ? 'selected' : ''}>Compact</option><option value="standard" ${settings.density === 'standard' ? 'selected' : ''}>Standard</option><option value="spacious" ${settings.density === 'spacious' ? 'selected' : ''}>Spacious</option></select></div>
+      <div class="field"><label for="line-weight">Divider weight</label><select id="line-weight" data-role="settings-select" data-key="lineWeight"><option value="light" ${settings.lineWeight === 'light' ? 'selected' : ''}>Light</option><option value="standard" ${settings.lineWeight === 'standard' ? 'selected' : ''}>Standard</option><option value="strong" ${settings.lineWeight === 'strong' ? 'selected' : ''}>Strong</option></select></div>
+      <div class="field"><label for="section-style">Section treatment</label><select id="section-style" data-role="settings-select" data-key="sectionStyle"><option value="plain" ${settings.sectionStyle === 'plain' ? 'selected' : ''}>Plain text</option><option value="line" ${settings.sectionStyle === 'line' ? 'selected' : ''}>Line divider</option><option value="band" ${settings.sectionStyle === 'band' ? 'selected' : ''}>Soft band</option><option value="stage" ${settings.sectionStyle === 'stage' ? 'selected' : ''}>Numbered stage</option></select></div>
     </section>
     <section class="settings-group">
       <h3>Arrangement</h3>
+      <div class="field"><label for="composition-mode">Composition mode</label><select id="composition-mode" data-role="architecture-select" data-path="compositionMode"><option value="flow" ${architecture.compositionMode === 'flow' ? 'selected' : ''}>Flow</option><option value="rows" ${architecture.compositionMode === 'rows' ? 'selected' : ''}>Rows</option><option value="deliberate-pages" ${architecture.compositionMode === 'deliberate-pages' ? 'selected' : ''}>Deliberate pages</option></select></div>
       <div class="field"><label for="columns">Columns</label><select id="columns" data-role="settings-select" data-key="columns"><option value="1" ${settings.columns === 1 ? 'selected' : ''}>One column</option><option value="2" ${settings.columns === 2 ? 'selected' : ''}>Two columns</option></select></div>
       <div class="field"><label for="working-style">Default working style</label><select id="working-style" data-role="settings-select" data-key="workingSpaceStyle"><option value="lines" ${settings.workingSpaceStyle === 'lines' ? 'selected' : ''}>Lines</option><option value="grid" ${settings.workingSpaceStyle === 'grid' ? 'selected' : ''}>Squared</option><option value="open" ${settings.workingSpaceStyle === 'open' ? 'selected' : ''}>Open</option></select></div>
       <div class="switch-row"><span>Question numbering</span><label class="switch"><input type="checkbox" data-role="settings-checkbox" data-key="questionNumbering" ${settings.questionNumbering ? 'checked' : ''}><span></span></label></div>
+      <div class="field"><label for="numbering-mode">Numbering mode</label><select id="numbering-mode" data-role="architecture-select" data-path="numbering.mode"><option value="automatic" ${architecture.numbering?.mode !== 'manual' ? 'selected' : ''}>Automatic</option><option value="manual" ${architecture.numbering?.mode === 'manual' ? 'selected' : ''}>Preserve manual numbers</option></select></div>
+      <div class="switch-row"><span>Restart numbering in sections</span><label class="switch"><input type="checkbox" data-role="architecture-numbering-checkbox" ${architecture.numbering?.restartAtSections ? 'checked' : ''}><span></span></label></div>
       <div class="switch-row"><span>Page numbers</span><label class="switch"><input type="checkbox" data-role="settings-checkbox" data-key="pageNumbers" ${settings.pageNumbers ? 'checked' : ''}><span></span></label></div>
+      <div class="switch-row"><span>Show question marks</span><label class="switch"><input type="checkbox" data-role="settings-checkbox" data-key="showMarks" ${settings.showMarks ? 'checked' : ''}><span></span></label></div>
+      <div class="field"><label for="total-marks">Total marks <span class="field-hint">(optional)</span></label><input id="total-marks" data-role="settings-number" data-key="totalMarks" type="number" min="0" max="999" value="${settings.totalMarks ?? ''}" placeholder="Calculated by teacher"></div>
     </section>
     <section class="settings-group">
       <h3>Page</h3>
       <div class="field"><label for="sheet-orientation">A4 orientation</label><select id="sheet-orientation" data-role="settings-select" data-key="orientation"><option value="portrait" ${settings.orientation === 'portrait' ? 'selected' : ''}>Portrait · 210 × 297 mm</option><option value="landscape" ${settings.orientation === 'landscape' ? 'selected' : ''}>Landscape · 297 × 210 mm</option></select></div>
-      <div class="field"><label for="margin-size">Print-safe margin</label><select id="margin-size" data-role="settings-select" data-key="marginMm"><option value="10" ${settings.marginMm === 10 ? 'selected' : ''}>Narrow · 10 mm</option><option value="12" ${settings.marginMm === 12 ? 'selected' : ''}>Standard · 12 mm</option><option value="15" ${settings.marginMm === 15 ? 'selected' : ''}>Wide · 15 mm</option></select></div>
+      <div class="field"><label for="margin-size">Print-safe margin</label><select id="margin-size" data-role="margin-preset"><option value="narrow" ${!settings.margins && settings.marginMm === 10 ? 'selected' : ''}>Narrow · 10 mm</option><option value="standard" ${!settings.margins && settings.marginMm === 12 ? 'selected' : ''}>Standard · 12 mm</option><option value="spacious" ${!settings.margins && settings.marginMm === 15 ? 'selected' : ''}>Spacious · 15 mm</option><option value="binder" ${settings.margins?.left === 18 ? 'selected' : ''}>Binder · extra left edge</option><option value="custom" ${settings.margins && settings.margins?.left !== 18 ? 'selected' : ''}>Custom safe margin</option></select></div>
+      <details class="custom-margin-details"><summary>Custom safe margins</summary><div class="field-grid" style="margin-top:8px">${['top', 'right', 'bottom', 'left'].map((edge) => `<div class="field"><label for="margin-${edge}">${humanOption(edge)} mm</label><input id="margin-${edge}" type="number" min="8" max="25" data-role="custom-margin" data-edge="${edge}" value="${settings.margins?.[edge] ?? settings.marginMm}"></div>`).join('')}</div></details>
+      <div class="switch-row"><span>Show version label in footer</span><label class="switch"><input type="checkbox" data-role="footer-version-checkbox" ${architecture.footer?.fields?.includes('version-label') ? 'checked' : ''}><span></span></label></div>
       <p style="margin:0;color:var(--muted);font-size:11px;line-height:1.45">Screen preview and print use the same fixed millimetre positions. Whole question blocks always move together.</p>
     </section>
   </div>`;
+}
+
+function versionOverrideCount(version) {
+  if (version.id === 'master') return 0;
+  const overrides = version.overrides ?? {};
+  return Object.keys(overrides.blockPatches ?? {}).length
+    + (overrides.hiddenBlockIds?.length ?? 0)
+    + (overrides.addedBlocks?.length ?? 0)
+    + (Object.keys(overrides.settings ?? {}).length ? 1 : 0)
+    + (Object.keys(overrides.metadata ?? {}).length ? 1 : 0)
+    + (Object.keys(overrides.pageArrangement ?? {}).length ? 1 : 0);
+}
+
+function renderVersionsContent() {
+  const master = masterWorksheet();
+  const versions = master.versions?.items ?? [];
+  const activeId = master.versions?.activeId ?? 'master';
+  const compareId = versions.some((version) => version.id === ui.comparisonVersionId) ? ui.comparisonVersionId : 'master';
+  const comparison = activeId === compareId ? [] : compareVersions(master, compareId, activeId).slice(0, 7);
+  versionsDialog.querySelector('#versions-content').innerHTML = `<div class="version-quick-actions">
+    ${[
+      ['supported', 'Create supported version'],
+      ['assessment', 'Create assessment version'],
+      ['teacher-model', 'Create teacher model'],
+      ['answer', 'Create answer version'],
+    ].map(([type, label]) => `<button type="button" class="secondary" data-action="create-version" data-type="${type}">${label}</button>`).join('')}
+  </div>
+  <div class="version-list" aria-label="Worksheet versions">
+    ${versions.map((version) => `<article class="version-row ${version.id === activeId ? 'is-active' : ''}">
+      <button type="button" class="version-open" data-action="set-active-version" data-id="${version.id}" aria-pressed="${version.id === activeId}">
+        <span class="version-mark">${version.id === 'master' ? 'M' : version.outputView === 'teacher' ? 'T' : version.outputView === 'answer' ? 'A' : 'P'}</span>
+        <span><strong>${escapeHtml(version.name)}</strong><small>${version.id === 'master' ? 'Master · inherited source' : `${versionOverrideCount(version)} adjusted item${versionOverrideCount(version) === 1 ? '' : 's'} · ${humanPurpose(version.type)}`}</small></span>
+      </button>
+      ${version.id !== 'master' ? `<div class="version-row-actions"><button type="button" class="tool-button" data-action="rename-version" data-id="${version.id}" aria-label="Rename ${escapeAttr(version.name)}">${icon('edit')}</button><button type="button" class="tool-button" data-action="remove-version" data-id="${version.id}" aria-label="Delete ${escapeAttr(version.name)}">${icon('trash')}</button></div>` : ''}
+    </article>`).join('')}
+  </div>
+  ${versions.length > 1 ? `<section class="version-comparison">
+    <div class="field"><label for="version-compare">Compare active version with</label><select id="version-compare" data-role="version-compare">${versions.map((version) => `<option value="${version.id}" ${version.id === compareId ? 'selected' : ''}>${escapeHtml(version.name)}</option>`).join('')}</select></div>
+    ${comparison.length ? `<div class="version-difference-list">${comparison.map((item) => `<div><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.differences.join(' · '))}</span></div>`).join('')}</div>` : '<p class="version-quiet">No differences to show against this version.</p>'}
+  </section>` : '<p class="version-quiet">Create a version only when it gives pupils a genuinely different route into the same mathematics.</p>'}`;
 }
 
 function renderProjectList() {
@@ -1193,6 +1463,73 @@ function moveBlock(id, direction) {
   store.dispatch(worksheetActions.reorderBlock(id, target));
 }
 
+function addCustomSection() {
+  const worksheet = store.getState();
+  const id = createId('section');
+  const heading = createQuestionBlock({
+    id,
+    kind: 'heading',
+    originalText: 'New section',
+    displayText: 'New section',
+    section: id,
+    sectionMeta: { role: 'custom', style: 'inherit' },
+    response: { type: 'none', size: 'compact' },
+    layout: { size: 'compact', keepWithNext: true },
+  });
+  store.dispatch(worksheetActions.addBlock(heading));
+  store.dispatch(worksheetActions.updateArchitecture({
+    sections: [...(worksheet.architecture?.sections ?? []), {
+      id,
+      headingId: id,
+      name: 'New section',
+      role: 'custom',
+      layout: 'flow',
+      startOnNewPage: false,
+      restartNumbering: false,
+      style: 'inherit',
+    }],
+  }));
+  ui.selectedId = id;
+  toast('New section added at the end of the worksheet.');
+}
+
+function moveSection(sectionId, direction) {
+  const worksheet = store.getState();
+  const sections = worksheet.architecture?.sections ?? [];
+  const from = sections.findIndex((section) => section.id === sectionId);
+  const to = direction === 'up' ? from - 1 : from + 1;
+  if (from < 0 || to < 0 || to >= sections.length) return;
+  const reorderedSections = [...sections];
+  const [section] = reorderedSections.splice(from, 1);
+  reorderedSections.splice(to, 0, section);
+  const grouped = new Map(reorderedSections.map((item) => [item.id, []]));
+  const unassigned = [];
+  for (const block of worksheet.blocks) {
+    const group = grouped.get(block.section);
+    if (group) group.push(block); else unassigned.push(block);
+  }
+  const blocks = [...unassigned, ...reorderedSections.flatMap((item) => grouped.get(item.id))];
+  store.dispatch(worksheetActions.replaceBlocks(blocks));
+  store.dispatch(worksheetActions.updateArchitecture({ sections: reorderedSections }));
+}
+
+async function removeSection(sectionId) {
+  const worksheet = store.getState();
+  const sections = worksheet.architecture?.sections ?? [];
+  const index = sections.findIndex((section) => section.id === sectionId);
+  if (index < 0) return;
+  const section = sections[index];
+  const confirmed = await askConfirm({ title: `Remove ${section.name}?`, message: 'Its questions will be kept and moved into the nearest remaining section.', actionLabel: 'Remove section' });
+  if (!confirmed) return;
+  const destination = sections[index - 1]?.id ?? sections[index + 1]?.id ?? null;
+  const blocks = worksheet.blocks
+    .filter((block) => block.id !== section.headingId)
+    .map((block) => block.section === sectionId ? { ...block, section: destination } : block);
+  store.dispatch(worksheetActions.replaceBlocks(blocks));
+  store.dispatch(worksheetActions.updateArchitecture({ sections: sections.filter((item) => item.id !== sectionId) }));
+  ui.selectedId = blocks.find((block) => block.kind === 'question')?.id ?? null;
+}
+
 function validatedModelForBlock(recipe, worksheet, options = {}) {
   const validation = validateRecipe(recipe, { intent: worksheet.intent });
   if (!validation.valid) return { model: null, validation };
@@ -1278,6 +1615,32 @@ function updateQuestionWording(block, displayText) {
   const text = String(displayText ?? '');
   const changed = { ...block, displayText: text };
   store.dispatch(worksheetActions.updateBlock(block.id, reanalyseQuestionBlock(changed)));
+}
+
+function applySafeNumberVariation() {
+  const block = selectedBlock();
+  if (!block || block.kind !== 'question') return;
+  const variation = createSafeNumberVariation(block.displayText, { seed: `${block.id}:${masterWorksheet().revision}` });
+  if (!variation.supported || !variation.changed) {
+    toast(variation.reason ?? 'This question is not a safe family for automatic value variation.', 'warning');
+    return;
+  }
+  const master = masterWorksheet();
+  if ((master.versions?.activeId ?? 'master') === 'master') {
+    dispatchMaster(worksheetActions.createVersion({ type: 'custom', name: 'Value variation', preset: false }));
+  }
+  const active = selectedBlock();
+  if (!active) return;
+  updateQuestionWording(active, variation.questionText ?? variation.variedText);
+  const answer = variation.type === 'division'
+    ? `${variation.values.quotient}${variation.values.remainder ? ` r ${variation.values.remainder}` : ''}`
+    : variation.values.result != null ? String(variation.values.result) : null;
+  if (answer != null) {
+    store.dispatch(worksheetActions.updateBlock(active.id, {
+      teacher: { ...active.teacher, answer },
+    }));
+  }
+  toast('A constraint-safe value variation was created in this version.');
 }
 
 function attachModel(family) {
@@ -1379,6 +1742,35 @@ function moveBlockToPage(id, direction) {
   }
 }
 
+function applySafePrintRepair() {
+  const worksheet = store.getState();
+  const pagination = paginateWorksheet(worksheet, { outputView: worksheet.outputView });
+  const crowded = new Set(pagination.crowdedPageNumbers ?? []);
+  if (!crowded.size) {
+    toast('No automatic repair is needed.');
+    return;
+  }
+  let repaired = 0;
+  const blocks = worksheet.blocks.map((block) => {
+    const placement = pagination.placements[block.id];
+    if (block.kind !== 'question' || !placement || !crowded.has(placement.page)) return block;
+    // Only relax a space that the architecture suggested. A teacher-created
+    // response area is deliberate and is never reduced automatically.
+    if (!block.response?.suggested || !['large', 'generous'].includes(block.response.size)) return block;
+    repaired += 1;
+    return {
+      ...block,
+      response: { ...block.response, size: 'standard', customRows: 0 },
+    };
+  });
+  if (!repaired) {
+    toast('There is no safe automatic repair. Move a question or adjust its working space.', 'warning');
+    return;
+  }
+  store.dispatch(worksheetActions.replaceBlocks(blocks));
+  toast(`Reduced ${repaired} suggested working space${repaired === 1 ? '' : 's'} to improve page balance.`);
+}
+
 document.addEventListener('input', (event) => {
   if (event.target.matches('#question-paste')) {
     ui.rawDraft = event.target.value;
@@ -1398,7 +1790,9 @@ document.addEventListener('change', (event) => {
   const target = event.target;
   const worksheet = store.getState();
   const block = selectedBlock(worksheet);
-  if (target.matches('[data-role="project-title"]')) {
+  if (target.matches('[data-role="worksheet-purpose"]')) {
+    dispatchMaster(worksheetActions.setPurpose(target.value));
+  } else if (target.matches('[data-role="project-title"]')) {
     const name = target.value.trim() || worksheet.metadata.title || 'Untitled worksheet';
     store.dispatch(worksheetActions.updateMetadata({ name }));
   } else if (target.matches('[data-role="question-display"]') && block) {
@@ -1434,7 +1828,47 @@ document.addEventListener('change', (event) => {
     ui.modelCategory = target.value;
     render();
   } else if (target.matches('[data-role="response-type"]') && block) {
-    store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, type: target.value }));
+    store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, type: target.value, suggested: false, teacherChosen: true }));
+  } else if (target.matches('[data-role="response-lines"]') && block) {
+    store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, lines: Number(target.value), suggested: false, teacherChosen: true }));
+  } else if (target.matches('[data-role="response-rows"]') && block) {
+    store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, rows: Number(target.value), suggested: false, teacherChosen: true }));
+  } else if (target.matches('[data-role="response-custom-rows"]') && block) {
+    store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, customRows: Number(target.value) || 0, suggested: false, teacherChosen: true }));
+  } else if (target.matches('[data-role="block-pattern"]') && block) {
+    store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, pattern: target.value, teacherChosen: true } }));
+  } else if (target.matches('[data-role="manual-number"]') && block) {
+    store.dispatch(worksheetActions.updateBlock(block.id, { manualNumber: target.value.trim() || null }));
+  } else if (target.matches('[data-role="block-section"]') && block) {
+    store.dispatch(worksheetActions.updateBlock(block.id, { section: target.value }));
+  } else if (target.matches('[data-role="keep-together"]') && block) {
+    store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, keepTogether: target.checked } }));
+  } else if (target.matches('[data-role="keep-with-next"]') && block) {
+    store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, keepWithNext: target.checked }, layout: { ...block.layout, keepWithNext: target.checked } }));
+  } else if (target.matches('[data-role="block-composition-text"]') && block) {
+    const key = target.dataset.key;
+    const value = key === 'vocabulary' ? target.value.split(/\s*,\s*/).filter(Boolean) : target.value;
+    store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, [key]: value } }));
+  } else if (target.matches('[data-role="section-role"]') && block?.kind === 'heading') {
+    const sections = (worksheet.architecture?.sections ?? []).map((section) => section.id === block.section ? { ...section, role: target.value } : section);
+    store.dispatch(worksheetActions.updateBlock(block.id, { sectionMeta: { ...block.sectionMeta, role: target.value } }));
+    store.dispatch(worksheetActions.updateArchitecture({ sections }));
+  } else if (target.matches('[data-role="section-layout"]') && block?.kind === 'heading') {
+    const sections = (worksheet.architecture?.sections ?? []).map((section) => section.id === block.section ? { ...section, layout: target.value } : section);
+    const compositionMode = sections.some((section) => section.layout === 'rows')
+      ? 'rows'
+      : worksheet.architecture?.compositionMode === 'rows' ? 'flow' : worksheet.architecture?.compositionMode;
+    store.dispatch(worksheetActions.updateArchitecture({ sections, compositionMode }));
+  } else if (target.matches('[data-role="section-new-page"]') && block?.kind === 'heading') {
+    const sections = (worksheet.architecture?.sections ?? []).map((section) => section.id === block.section ? { ...section, startOnNewPage: target.checked } : section);
+    store.dispatch(worksheetActions.updateArchitecture({ sections }));
+  } else if (target.matches('[data-role="version-compare"]')) {
+    ui.comparisonVersionId = target.value;
+    renderVersionsContent();
+  } else if (target.matches('[data-role="print-version"]')) {
+    dispatchMaster(worksheetActions.setActiveVersion(target.value));
+  } else if (target.matches('[data-role="print-duplex"]')) {
+    dispatchMaster(worksheetActions.updatePrintSettings({ duplexPlan: target.value, selectedVersionId: masterWorksheet().versions?.activeId ?? 'master' }));
   } else if (target.matches('[data-role="manual-break"]') && block) {
     store.dispatch(worksheetActions.setManualBreak(block.id, target.checked));
   } else if (target.matches('[data-role="teacher-model-toggle"]') && block?.model) {
@@ -1444,8 +1878,44 @@ document.addEventListener('change', (event) => {
     store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, answer: target.value || null } }));
   } else if (target.matches('[data-role="teacher-notes"]') && block) {
     store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, notes: target.value } }));
+  } else if (target.matches('[data-role="teacher-field"]') && block) {
+    store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, [target.dataset.key]: target.value } }));
   } else if (target.matches('[data-role="metadata-field"]')) {
     store.dispatch(worksheetActions.updateMetadata({ [target.dataset.key]: target.value }));
+    if (settingsDialog.open) renderSettingsContent();
+  } else if (target.matches('[data-role="architecture-select"]')) {
+    const architecture = setPath(worksheet.architecture ?? {}, target.dataset.path, target.value);
+    store.dispatch(worksheetActions.updateArchitecture(architecture));
+    if (settingsDialog.open) renderSettingsContent();
+  } else if (target.matches('[data-role="architecture-header-checkbox"]')) {
+    const fields = { ...(worksheet.architecture?.header?.fields ?? {}), [target.dataset.key]: target.checked };
+    store.dispatch(worksheetActions.updateArchitecture({ header: { ...(worksheet.architecture?.header ?? {}), fields } }));
+    if (settingsDialog.open) renderSettingsContent();
+  } else if (target.matches('[data-role="architecture-numbering-checkbox"]')) {
+    store.dispatch(worksheetActions.updateArchitecture({ numbering: { ...(worksheet.architecture?.numbering ?? {}), restartAtSections: target.checked } }));
+    if (settingsDialog.open) renderSettingsContent();
+  } else if (target.matches('[data-role="footer-version-checkbox"]')) {
+    const fields = new Set(worksheet.architecture?.footer?.fields ?? ['title', 'page-number']);
+    if (target.checked) fields.add('version-label'); else fields.delete('version-label');
+    store.dispatch(worksheetActions.updateArchitecture({ footer: { ...(worksheet.architecture?.footer ?? {}), fields: [...fields] } }));
+    if (settingsDialog.open) renderSettingsContent();
+  } else if (target.matches('[data-role="margin-preset"]')) {
+    if (target.value === 'custom') return;
+    const patch = target.value === 'binder'
+      ? { marginMm: 12, margins: { top: 12, right: 12, bottom: 12, left: 18 } }
+      : target.value === 'narrow' ? { marginMm: 10, margins: null }
+        : target.value === 'spacious' ? { marginMm: 15, margins: null }
+          : { marginMm: 12, margins: null };
+    store.dispatch(worksheetActions.updateSettings(patch));
+    if (settingsDialog.open) renderSettingsContent();
+  } else if (target.matches('[data-role="custom-margin"]')) {
+    const current = worksheet.settings.margins ?? {
+      top: worksheet.settings.marginMm,
+      right: worksheet.settings.marginMm,
+      bottom: worksheet.settings.marginMm,
+      left: worksheet.settings.marginMm,
+    };
+    store.dispatch(worksheetActions.updateSettings({ margins: { ...current, [target.dataset.edge]: Number(target.value) } }));
     if (settingsDialog.open) renderSettingsContent();
   } else if (target.matches('[data-role="settings-checkbox"]')) {
     store.dispatch(worksheetActions.updateSettings({ [target.dataset.key]: target.checked }));
@@ -1454,6 +1924,10 @@ document.addEventListener('change', (event) => {
     const key = target.dataset.key;
     const value = ['columns', 'marginMm'].includes(key) ? Number(target.value) : target.value;
     store.dispatch(worksheetActions.updateSettings({ [key]: value }));
+    if (settingsDialog.open) renderSettingsContent();
+  } else if (target.matches('[data-role="settings-number"]')) {
+    const value = target.value === '' ? null : Number(target.value);
+    store.dispatch(worksheetActions.updateSettings({ [target.dataset.key]: value }));
     if (settingsDialog.open) renderSettingsContent();
   }
 });
@@ -1484,11 +1958,13 @@ document.addEventListener('click', async (event) => {
     render();
     requestAnimationFrame(() => document.querySelector('#question-paste')?.focus());
   } else if (action === 'begin-check') beginCheck();
-  else if (action === 'set-intent') store.dispatch(worksheetActions.setIntent(button.dataset.value));
+  else if (action === 'set-intent') dispatchMaster(worksheetActions.setIntent(button.dataset.value));
+  else if (action === 'set-purpose') dispatchMaster(worksheetActions.setPurpose(button.dataset.value));
   else if (action === 'make-worksheet') buildFirstDraft();
+  else if (action === 'suggest-new-order') applySuggestedOrder();
   else if (action === 'restore-original') {
-    const parsed = parseQuestions(store.getState().originalImport.rawText);
-    store.dispatch(worksheetActions.replaceBlocks(parsedItemsToBlocks(parsed)));
+    const parsed = parseQuestions(masterWorksheet().originalImport.rawText);
+    dispatchMaster(worksheetActions.replaceBlocks(parsedItemsToBlocks(parsed)));
     toast('Original imported wording restored.');
   } else if (action === 'edit-block') {
     const block = store.getState().blocks.find((item) => item.id === id);
@@ -1567,7 +2043,16 @@ document.addEventListener('click', async (event) => {
     else store.dispatch(worksheetActions.setModel(block.id, model));
   } else if (action === 'set-response-size') {
     const block = selectedBlock();
-    if (block) store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, size: button.dataset.value }));
+    if (block) store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, size: button.dataset.value, suggested: false, teacherChosen: true }));
+  } else if (action === 'set-footprint') {
+    const block = selectedBlock();
+    if (block) {
+      const footprint = button.dataset.value;
+      store.dispatch(worksheetActions.updateBlock(block.id, {
+        composition: { ...block.composition, footprint, teacherChosen: true },
+        layout: { ...block.layout, columnSpan: footprint === 'full' || footprint === 'page' ? 'full' : footprint === 'half' ? 'half' : 'auto' },
+      }));
+    }
   } else if (action === 'resolve-division') resolveDivision(button.dataset.value);
   else if (action === 'toggle-interpretation') {
     ui.editingInterpretation = !ui.editingInterpretation;
@@ -1586,6 +2071,58 @@ document.addEventListener('click', async (event) => {
   else if (action === 'set-accent') {
     store.dispatch(worksheetActions.updateSettings({ accentColor: button.dataset.value }));
     renderSettingsContent();
+  } else if (action === 'apply-style-preset') {
+    store.dispatch(worksheetActions.applyStylePreset(button.dataset.value));
+    renderSettingsContent();
+  } else if (action === 'open-versions') {
+    renderVersionsContent();
+    versionsDialog.showModal();
+  } else if (action === 'create-version') {
+    dispatchMaster(worksheetActions.createVersion({ type: button.dataset.type }));
+    ui.comparisonVersionId = 'master';
+    renderVersionsContent();
+    render();
+  } else if (action === 'set-active-version') {
+    dispatchMaster(worksheetActions.setActiveVersion(button.dataset.id));
+    ui.comparisonVersionId = 'master';
+    if (versionsDialog.open) renderVersionsContent();
+    render();
+  } else if (action === 'rename-version') {
+    const version = masterWorksheet().versions?.items?.find((item) => item.id === button.dataset.id);
+    const name = window.prompt('Name this version', version?.name ?? 'Custom version');
+    if (name?.trim()) {
+      dispatchMaster(worksheetActions.updateVersion(button.dataset.id, { name: name.trim() }));
+      renderVersionsContent();
+    }
+  } else if (action === 'remove-version') {
+    const version = masterWorksheet().versions?.items?.find((item) => item.id === button.dataset.id);
+    const confirmed = await askConfirm({ title: `Delete ${version?.name ?? 'this version'}?`, message: 'The master worksheet and other versions stay intact.', actionLabel: 'Delete version' });
+    if (confirmed) {
+      dispatchMaster(worksheetActions.removeVersion(button.dataset.id));
+      if (versionsDialog.open) renderVersionsContent();
+      render();
+    }
+  } else if (action === 'reset-version-block') {
+    const activeId = masterWorksheet().versions?.activeId ?? 'master';
+    if (activeId !== 'master') {
+      dispatchMaster(worksheetActions.resetVersionBlock(activeId, id));
+      toast('This question now inherits the Standard version again.');
+      render();
+    }
+  } else if (action === 'add-section') {
+    addCustomSection();
+    render();
+  } else if (action === 'move-section') {
+    moveSection(id, button.dataset.direction);
+    render();
+  } else if (action === 'remove-section') {
+    await removeSection(id);
+    render();
+  } else if (action === 'vary-numbers') {
+    applySafeNumberVariation();
+  } else if (action === 'jump-page') {
+    const page = document.querySelector(`.a4-shell [data-page-number="${CSS.escape(button.dataset.page)}"]`);
+    page?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
   } else if (action === 'open-navigator') {
     ui.navigatorOpen = true;
     ui.inspectorOpen = false;
@@ -1599,6 +2136,7 @@ document.addEventListener('click', async (event) => {
     ui.navigatorOpen = false;
     render();
   } else if (action === 'go-stage') goStage(button.dataset.stage);
+  else if (action === 'apply-print-repair') applySafePrintRepair();
   else if (action === 'print-now') {
     store.flush();
     requestAnimationFrame(() => window.print());
@@ -1670,6 +2208,71 @@ document.addEventListener('dragend', () => {
   ui.dragging = null;
   document.querySelectorAll('.dragging').forEach((element) => element.classList.remove('dragging'));
 });
+
+// Native HTML drag remains useful with a mouse.  iPad Safari is more reliable
+// when an explicit handle owns a small, thresholded Pointer Events gesture.
+// Nothing starts while the teacher scrolls the page; only the visible handle
+// can begin this alternative reordering path.
+let touchBlockDrag = null;
+
+function clearTouchBlockDrag() {
+  document.querySelectorAll('.touch-dragging, .touch-drop-before').forEach((element) => {
+    element.classList.remove('touch-dragging', 'touch-drop-before');
+  });
+  touchBlockDrag = null;
+}
+
+document.addEventListener('pointerdown', (event) => {
+  const handle = event.target.closest('.block-drag-handle[data-drag-id]');
+  if (!handle || event.pointerType === 'mouse') return;
+  touchBlockDrag = {
+    id: handle.dataset.dragId,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,
+    targetId: null,
+    insertAfter: false,
+  };
+  handle.setPointerCapture?.(event.pointerId);
+}, { passive: true });
+
+document.addEventListener('pointermove', (event) => {
+  if (!touchBlockDrag || event.pointerId !== touchBlockDrag.pointerId) return;
+  const distance = Math.hypot(event.clientX - touchBlockDrag.startX, event.clientY - touchBlockDrag.startY);
+  if (!touchBlockDrag.active && distance < 10) return;
+  event.preventDefault();
+  if (!touchBlockDrag.active) {
+    touchBlockDrag.active = true;
+    document.querySelector(`.question-block[data-block-id="${CSS.escape(touchBlockDrag.id)}"]`)?.classList.add('touch-dragging');
+  }
+  const element = document.elementFromPoint(event.clientX, event.clientY);
+  const target = element?.closest('.question-block[data-block-id]');
+  document.querySelectorAll('.touch-drop-before').forEach((node) => node.classList.remove('touch-drop-before'));
+  if (!target || target.dataset.blockId === touchBlockDrag.id) {
+    touchBlockDrag.targetId = null;
+    return;
+  }
+  const bounds = target.getBoundingClientRect();
+  touchBlockDrag.targetId = target.dataset.blockId;
+  touchBlockDrag.insertAfter = event.clientY > bounds.top + bounds.height / 2;
+  target.classList.add('touch-drop-before');
+}, { passive: false });
+
+document.addEventListener('pointerup', (event) => {
+  if (!touchBlockDrag || event.pointerId !== touchBlockDrag.pointerId) return;
+  const gesture = touchBlockDrag;
+  clearTouchBlockDrag();
+  if (!gesture.active || !gesture.targetId) return;
+  const blocks = store.getState().blocks;
+  const targetIndex = blocks.findIndex((block) => block.id === gesture.targetId);
+  if (targetIndex < 0) return;
+  const destination = targetIndex + (gesture.insertAfter ? 1 : 0);
+  store.dispatch(worksheetActions.reorderBlock(gesture.id, destination));
+  toast('Question moved.');
+}, { passive: true });
+
+document.addEventListener('pointercancel', clearTouchBlockDrag, { passive: true });
 
 document.querySelector('#project-library-button').addEventListener('click', () => {
   store.flush();

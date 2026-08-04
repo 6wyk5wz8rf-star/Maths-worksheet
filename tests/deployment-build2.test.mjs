@@ -51,9 +51,9 @@ async function moduleDependencyPaths(entryPath) {
   return visited;
 }
 
-test('Build 2 uses a fresh, explicit cache namespace', async () => {
+test('Build 3 uses a fresh, explicit cache namespace', async () => {
   const worker = await readProjectFile('service-worker.js');
-  assert.match(worker, /const CACHE = 'maths-page-studio-build-2-v\d+';/);
+  assert.match(worker, /const CACHE = 'maths-page-studio-build-3-v\d+';/);
   assert.match(worker, /self\.skipWaiting\(\)/);
   assert.match(worker, /self\.clients\.claim\(\)/);
 });
