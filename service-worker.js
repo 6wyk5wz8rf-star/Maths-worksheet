@@ -2,13 +2,14 @@
 // The prefix is deliberately product-specific so activation never removes
 // unrelated caches that happen to share the same origin.
 const CACHE_PREFIX = 'maths-page-studio-';
-const CACHE = `${CACHE_PREFIX}release-v1`;
+const CACHE = `${CACHE_PREFIX}release-v2`;
 const SHELL = [
   './',
   './index.html',
   './css/styles.css',
+  './css/styles.css?v=release-v2',
   './js/app.js',
-  './js/app.js?v=release-v1',
+  './js/app.js?v=release-v2',
   './js/parser.js',
   './js/question-intelligence.js',
   './js/build2-model-bank.js',
@@ -17,15 +18,15 @@ const SHELL = [
   './js/model-renderers.js',
   './js/build2-model-renderers.js',
   './js/worksheet-architecture.js',
-  './js/worksheet-architecture.js?v=release-v1',
+  './js/worksheet-architecture.js?v=release-v2',
   './js/worksheet-versions.js',
-  './js/worksheet-versions.js?v=release-v1',
+  './js/worksheet-versions.js?v=release-v2',
   './js/number-variation.js',
-  './js/number-variation.js?v=release-v1',
+  './js/number-variation.js?v=release-v2',
   './js/state.js',
-  './js/state.js?v=release-v1',
+  './js/state.js?v=release-v2',
   './js/pagination.js',
-  './js/pagination.js?v=release-v1',
+  './js/pagination.js?v=release-v2',
   './assets/icon.svg',
   './manifest.webmanifest'
 ];

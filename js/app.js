@@ -23,8 +23,8 @@ import {
   duplicateProject as duplicateStoredProject,
   worksheetActions,
   createId,
-} from './state.js?v=release-v1';
-import { paginateWorksheet, mmToPx } from './pagination.js?v=release-v1';
+} from './state.js?v=release-v2';
+import { paginateWorksheet, mmToPx } from './pagination.js?v=release-v2';
 import {
   SECTION_ROLES,
   STYLE_PRESETS,
@@ -32,9 +32,9 @@ import {
   footprintForPattern,
   suggestNewQuestionOrder,
   suggestWorksheetArchitecture,
-} from './worksheet-architecture.js?v=release-v1';
-import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=release-v1';
-import { createSafeNumberVariation } from './number-variation.js?v=release-v1';
+} from './worksheet-architecture.js?v=release-v2';
+import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=release-v2';
+import { createSafeNumberVariation } from './number-variation.js?v=release-v2';
 
 const SAMPLE_TEXT = `Place value
 
