@@ -26,6 +26,14 @@ const MARK_PATTERNS = [
   /(?:^|[ \t])(\d+)\s+marks?\s*$/gim
 ];
 
+// These short, familiar labels are safe to treat as section headings even
+// when they appear directly after a numbered question. Copied web content
+// often omits a blank line before the next label; without this explicit list
+// a heading such as "Reasoning" would be accidentally appended to the
+// previous question. Keep the list deliberately narrow so wrapped prose is
+// still preserved intact.
+const EXPLICIT_SECTION_HEADING = /^(?:section\s+[a-z0-9]+\b|place value|addition|subtraction|multiplication|division|fractions?|number|reasoning|problem solving|fluency|challenge|practice|explain|prove|stretch|extension|statistics|measurement|geometry|position and direction)(?:\s+questions?)?\s*:?$/i;
+
 /** Return an exact two-part split. No trimming or normalisation is applied. */
 export function splitQuestionAt(text, index) {
   const source = String(text ?? '');
@@ -158,8 +166,7 @@ function textHasMath(text) {
 function looksLikeHeading(text) {
   const clean = text.trim();
   if (!clean || clean.length > 90 || /[?.!]$/.test(clean)) return false;
-  if (/^section\s+[a-z0-9]+\b/i.test(clean)) return true;
-  if (/^(?:place value|addition|subtraction|multiplication|division|fractions?|number|reasoning|problem solving|fluency)(?:\s+questions?)?\s*:?$/i.test(clean)) return true;
+  if (EXPLICIT_SECTION_HEADING.test(clean)) return true;
 
   const words = clean.replace(/[:\u2013\u2014-]+$/, '').split(/\s+/);
   const hasTaskVerb = TASK_VERBS.some((verb) => new RegExp(`^${escapeRegExp(verb)}\\b`, 'i').test(clean));
@@ -293,6 +300,14 @@ export function parseQuestions(rawText) {
     }
 
     if (current) {
+      // An explicit label on its own line is structural rather than a wrapped
+      // continuation of the preceding question. This keeps copied section
+      // headings attached to the worksheet, not to the question above.
+      if (EXPLICIT_SECTION_HEADING.test(clean)) {
+        finishCurrent();
+        addStandalone('section-heading', line);
+        continue;
+      }
       // An unmarked line adjacent to a question is preserved as part of that
       // question, which protects wrapped and multi-line word problems.
       current.end = line.contentEnd;

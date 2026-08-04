@@ -1,3 +1,10 @@
+import {
+  BUILD2_MODEL_BANK,
+  createBuild2ModelRecipe,
+  getBuild2ModelDefinition,
+  normalizeBuild2ModelRecipe,
+} from './build2-model-bank.js';
+
 /**
  * Maths Page Studio model registry.
  *
@@ -348,7 +355,50 @@ function deepFreeze(value) {
   return value;
 }
 
-const completeDefinitions = definitions.map((item) => ({
+const build2PurposeToLegacy = Object.freeze({
+  'interpret-situation': 'question-information',
+  'expose-structure': 'thinking-model',
+  'support-calculation': 'thinking-model',
+  'support-reasoning': 'thinking-model',
+  'record-thinking': 'response-model',
+  'represent-data': 'question-information',
+  'pupil-workspace': 'response-model',
+});
+
+const build2Definitions = Object.values(BUILD2_MODEL_BANK).map((item) => ({
+  ...item,
+  purpose: item.childDescription || item.accessibleDescription,
+  mathematicalPurpose: item.childDescription || item.accessibleDescription,
+  compatibleDomains: item.domains,
+  supportedValues: item.numericalConstraints,
+  requiredParameters: [],
+  suitableYearRange: { min: 4, max: 4 },
+  yearRange: { min: 4, max: 4 },
+  completionStates: COMPLETION_STATES,
+  answerRevealRisk: { level: item.answerProtection?.level ?? 'medium', when: item.answerProtection?.pupilRule ?? '' },
+  printBehaviour: `Supports ${item.print?.supportedSizes?.join(', ') ?? 'standard'} print sizes and remains a complete worksheet block.`,
+  monochromeBehaviour: item.print?.monochrome ?? 'Line, label and hatch distinctions remain visible in monochrome.',
+  matchingTags: item.searchTerms,
+  matchingRules: {
+    positiveTags: item.searchTerms,
+    blockedWhen: item.contraindications,
+    compatibilityGate: 'validateRecipe',
+  },
+  rendererKey: item.renderer,
+  editorFields: item.editorFields.filter((field) => !['scaffoldState', 'size'].includes(field.key)),
+  createDefaultRecipe: (seed = {}) => {
+    const recipe = createBuild2ModelRecipe(item.id, seed);
+    recipe.completionState = recipe.scaffoldState === 'modelled'
+      ? 'completed'
+      : recipe.scaffoldState === 'blank' ? 'blank' : 'partly-completed';
+    recipe.purpose = build2PurposeToLegacy[item.representationPurposes?.[0]] ?? 'thinking-model';
+    recipe.lockState = 'mathematical';
+    return recipe;
+  },
+}));
+
+const completeDefinitions = [
+  ...definitions.map((item) => ({
   ...item,
   mathematicalPurpose: item.purpose,
   compatibleDomains: item.domains,
@@ -360,7 +410,9 @@ const completeDefinitions = definitions.map((item) => ({
     compatibilityGate: "validateRecipe",
   },
   rendererKey: item.id,
-}));
+  })),
+  ...build2Definitions,
+];
 
 export const MODEL_REGISTRY = deepFreeze(Object.fromEntries(completeDefinitions.map((item) => [item.id, item])));
 
@@ -796,6 +848,44 @@ export function normalizeRecipe(input) {
   if (!input || typeof input !== "object") return { recipe: null, warnings, errors: [error("RECIPE_REQUIRED", "A model recipe is required.")] };
   const definition = getModelDefinition(input.family);
   if (!definition) return { recipe: null, warnings, errors: [error("UNKNOWN_MODEL", `Unknown model family: ${input.family ?? "missing"}`)] };
+
+  // Build 2 families retain their own compact, declarative schema.  This
+  // adapter deliberately exposes the familiar Build 1 state names too, so the
+  // established editor, printer and saved-project normalisers remain stable.
+  if (getBuild2ModelDefinition(input.family)) {
+    const build2Input = clone(input);
+    if (!build2Input.scaffoldState && build2Input.completionState) {
+      build2Input.scaffoldState = build2Input.completionState === 'completed'
+        ? 'modelled'
+        : build2Input.completionState === 'blank' ? 'blank' : 'guided';
+    }
+    const result = normalizeBuild2ModelRecipe(build2Input);
+    if (!result.recipe) {
+      return {
+        recipe: null,
+        warnings: result.warnings.map((message, index) => warning(`BUILD2_WARNING_${index}`, message)),
+        errors: result.errors.map((message, index) => error(`BUILD2_INVALID_${index}`, message)),
+      };
+    }
+    const recipe = {
+      ...result.recipe,
+      completionState: result.recipe.scaffoldState === 'modelled'
+        ? 'completed'
+        : result.recipe.scaffoldState === 'blank' ? 'blank' : 'partly-completed',
+      purpose: MODEL_PURPOSES.includes(input.purpose)
+        ? input.purpose
+        : build2PurposeToLegacy[definition.representationPurposes?.[0]] ?? 'thinking-model',
+      lockState: 'mathematical',
+      metadata: { ...(result.recipe.metadata ?? {}), build2: true },
+    };
+    if (recipe.sourceHasDiagram) warnings.push(warning("POSSIBLE_DUPLICATE_DIAGRAM", "The source question may already contain a diagram; check that this model is not duplicating it."));
+    if (recipe.colorOnlyEncoding) errors.push(error("COLOUR_ONLY_MEANING", "Mathematical meaning cannot be encoded by colour alone."));
+    return {
+      recipe,
+      warnings: [...result.warnings.map((message, index) => warning(`BUILD2_WARNING_${index}`, message)), ...warnings],
+      errors: [...result.errors.map((message, index) => error(`BUILD2_INVALID_${index}`, message)), ...errors],
+    };
+  }
   const adaptedInput = adaptMatcherRecipe(input, warnings);
   const recipe = mergeRecipe(definition.createDefaultRecipe(), adaptedInput);
   normalizeCommon(recipe, warnings);

@@ -3,6 +3,7 @@ import {
   getModelDefinition,
   validateRecipe,
 } from "./model-registry.js";
+import { renderBuild2Model } from "./build2-model-renderers.js";
 
 const SIZE_BOXES = Object.freeze({
   compact: { width: 420, height: 150 },
@@ -457,7 +458,13 @@ export function renderModel(input, options = {}) {
   if (!validation.valid) return invalidModel(input?.family, validation.errors);
   const recipe = validation.normalizedRecipe;
   const definition = getModelDefinition(recipe.family);
-  return MODEL_RENDERERS[recipe.family](recipe, definition, options);
+  const legacyRenderer = MODEL_RENDERERS[recipe.family];
+  // Build 1 recipes retain their original renderer. Build 2 models are
+  // validated again by their declarative renderer, which keeps every new
+  // diagram mathematically constrained even after a saved-project migration.
+  return legacyRenderer
+    ? legacyRenderer(recipe, definition, options)
+    : renderBuild2Model(recipe, options);
 }
 
 export function renderModelPreview(input, options = {}) {

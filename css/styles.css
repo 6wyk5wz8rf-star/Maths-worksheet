@@ -618,7 +618,9 @@ svg { display: block; }
 .worksheet-page {
   position: relative;
   width: 210mm;
+  width: var(--mps-page-width, 210mm);
   height: 297mm;
+  height: var(--mps-page-height, 297mm);
   overflow: hidden;
   color: #252330;
   background: var(--paper);
@@ -743,7 +745,12 @@ svg { display: block; }
 .mps-model__tick,
 .mps-model__bracket { stroke: currentColor; fill: none; }
 .mps-model__safety-message { width: 100%; padding: 3mm; border: .45pt solid #9b6e44; border-radius: 2mm; color: #6c4828; background: #faf0df; font: 7.8pt/1.4 Inter, sans-serif; }
+.mps-build2-model { display: block; width: 100%; height: 100%; margin: 0; color: #35313e; }
+.mps-build2-model__svg { display: block; width: 100%; height: 100%; max-height: 100%; overflow: visible; }
+.mps-build2-model text { font-family: Inter, ui-sans-serif, sans-serif; }
+.mps-build2-model > div { display: grid; gap: 1mm; min-height: 100%; padding: 3mm; border: .45pt solid #9b6e44; border-radius: 2mm; color: #6c4828; background: #faf0df; font: 7.8pt/1.4 Inter, sans-serif; }
 .suggestion-preview .mps-model { width: 70px; height: 52px; }
+.suggestion-preview .mps-build2-model { width: 76px; height: 52px; }
 .suggestion-preview .mps-model__label { font-size: 18px; }
 .suggestion-preview .mps-model__label--small { font-size: 14px; }
 .suggestion-preview .mps-model__value { font-size: 19px; }
@@ -875,6 +882,28 @@ svg { display: block; }
 .switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgb(0 0 0 / 20%); transition: transform .15s ease; }
 .switch input:checked + span { background: var(--indigo); }
 .switch input:checked + span::after { transform: translateX(18px); }
+.switch-row small { display: block; margin-top: 2px; font-weight: 500; }
+
+.model-bank-picker { min-height: 0; }
+.model-bank-results { max-height: min(52dvh, 560px); margin-top: 10px; overflow: auto; overscroll-behavior: contain; padding-right: 2px; }
+.model-category-list { display: grid; gap: 7px; }
+.model-category-button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: white; text-align: left; font-size: 11px; font-weight: 750; cursor: pointer; }
+.model-category-button:hover { border-color: #aaa5c6; background: var(--indigo-wash); }
+.model-category-button small { color: var(--muted); font-size: 9.5px; font-weight: 650; }
+.empty-bank { padding: 14px 4px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.interpretation-panel.needs-review { margin-inline: -4px; padding-inline: 4px; border-left: 2px solid #d4a951; }
+.interpretation-panel h3 .confidence { margin-left: 5px; vertical-align: middle; }
+.interpretation-fields { margin-top: 9px; }
+
+.batch-menu { position: relative; }
+.batch-menu > summary { min-height: 42px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink-soft); background: white; list-style: none; font-size: 11px; font-weight: 800; cursor: pointer; }
+.batch-menu > summary::-webkit-details-marker { display: none; }
+.batch-menu > summary::after { content: "⌄"; margin-left: 6px; color: var(--muted); }
+.batch-menu[open] > summary { border-color: #aaa5c6; color: var(--indigo-deep); background: var(--indigo-wash); }
+.batch-menu-panel { position: absolute; z-index: 70; top: calc(100% + 6px); right: 0; display: grid; width: 224px; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.batch-menu-panel button { min-height: 38px; padding: 7px 10px; border: 0; border-radius: 8px; color: var(--ink-soft); background: transparent; text-align: left; font-size: 11px; font-weight: 700; cursor: pointer; }
+.batch-menu-panel button:hover { color: var(--indigo-deep); background: var(--indigo-pale); }
+.batch-menu-panel .batch-warning { color: var(--rose-deep); }
 
 .inspector-actions { display: grid; grid-template-columns: 1fr auto; gap: 7px; margin-top: 11px; }
 .inspector-actions button { min-height: 42px; font-size: 11px; }
@@ -1069,6 +1098,7 @@ svg { display: block; }
 
 @media print {
   @page { size: A4 portrait; margin: 0; }
+  @page mps-landscape { size: A4 landscape; margin: 0; }
   :root { --header-h: 0; }
   html,
   body { width: 210mm; min-width: 210mm; margin: 0; padding: 0; background: white; }
@@ -1092,9 +1122,10 @@ svg { display: block; }
   .print-checks,
   .print-preview-panel,
   .page-stack { display: block; margin: 0; padding: 0; background: white; }
-  .a4-shell { width: 210mm !important; height: 297mm !important; margin: 0 !important; break-after: page; page-break-after: always; }
+  .a4-shell { width: var(--mps-page-width, 210mm) !important; height: var(--mps-page-height, 297mm) !important; margin: 0 !important; break-after: page; page-break-after: always; }
   .a4-shell:last-child { break-after: auto; page-break-after: auto; }
-  .worksheet-page { width: 210mm; height: 297mm; box-shadow: none; transform: none !important; }
+  .worksheet-page { width: var(--mps-page-width, 210mm); height: var(--mps-page-height, 297mm); box-shadow: none; transform: none !important; }
+  .worksheet-page.orientation-landscape { page: mps-landscape; }
   .worksheet-page::after { display: none; }
   .question-block { break-inside: avoid; page-break-inside: avoid; }
 }

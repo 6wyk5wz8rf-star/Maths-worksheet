@@ -6,9 +6,12 @@
  */
 
 export const WORKSHEET_SCHEMA = 'maths-page-studio/worksheet';
-export const WORKSHEET_VERSION = 1;
+export const WORKSHEET_VERSION = 2;
 export const STORAGE_PREFIX = 'maths-page-studio';
 export const PROJECT_INDEX_KEY = `${STORAGE_PREFIX}:projects:v${WORKSHEET_VERSION}`;
+const LEGACY_PROJECT_INDEX_KEYS = Object.freeze([
+  `${STORAGE_PREFIX}:projects:v1`,
+]);
 export const CURRENT_PROJECT_KEY = `${STORAGE_PREFIX}:current-project`;
 
 const VALID_INTENTS = new Set(['practice', 'homework', 'assessment']);
@@ -23,6 +26,7 @@ const VALID_MODEL_PURPOSES = new Set([
 ]);
 const VALID_MODEL_SIZES = new Set(['compact', 'standard', 'large']);
 const VALID_MODEL_POSITIONS = new Set(['above', 'beside', 'beneath']);
+const VALID_BUILD2_SCAFFOLD_STATES = new Set(['blank', 'guided', 'modelled']);
 const VALID_RESPONSE_TYPES = new Set([
   'none',
   'short-answer',
@@ -103,6 +107,10 @@ function oneOf(value, valid, fallback) {
 }
 
 function safeNumber(value, fallback = null) {
+  // `Number(null)` is zero, but an omitted optional print dimension is not a
+  // request for an 8 mm model. Keep absent values absent so pagination can
+  // use the model family's safe print metrics.
+  if (value === null || value === undefined || value === '') return fallback;
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
@@ -137,6 +145,8 @@ export function createModelRecipe(family, overrides = {}) {
   const completionState = requestedCompletionState === 'partial'
     ? 'partly-completed'
     : requestedCompletionState;
+  const scaffoldState = source.scaffoldState
+    ?? (completionState === 'completed' ? 'modelled' : completionState === 'blank' ? 'blank' : 'guided');
   const unit = typeof source.unit === 'string'
     ? source.unit
     : Array.isArray(source.units) ? asText(source.units[0]) : asText(source.units);
@@ -148,6 +158,8 @@ export function createModelRecipe(family, overrides = {}) {
   if (canonicalFamily === 'equal-groups') {
     values.groups ??= values.groupCount;
   }
+  const suppliedPrintHeight = safeNumber(source.printHeightMm);
+  const suppliedPrintMinWidth = safeNumber(source.printMinWidthMm);
   return {
     recipeVersion: Math.max(1, safeNumber(source.recipeVersion, 1)),
     family: canonicalFamily,
@@ -157,6 +169,10 @@ export function createModelRecipe(family, overrides = {}) {
     unit,
     units: unit ? [unit] : [],
     unknown: source.unknown ?? null,
+    hidden: uniqueStrings(source.hidden),
+    scaffoldState: oneOf(scaffoldState, VALID_BUILD2_SCAFFOLD_STATES, 'guided'),
+    linked: source.linked !== false,
+    teacherChosen: Boolean(source.teacherChosen),
     completionState: oneOf(completionState, VALID_MODEL_STATES, 'blank'),
     purpose: oneOf(source.purpose, VALID_MODEL_PURPOSES, 'thinking-model'),
     size: oneOf(source.size, VALID_MODEL_SIZES, 'standard'),
@@ -167,8 +183,11 @@ export function createModelRecipe(family, overrides = {}) {
     worksheetIntent: source.worksheetIntent ?? null,
     sourceHasDiagram: Boolean(source.sourceHasDiagram),
     colorOnlyEncoding: Boolean(source.colorOnlyEncoding),
-    printHeightMm: safeNumber(source.printHeightMm),
-    printMinWidthMm: safeNumber(source.printMinWidthMm),
+    // Older saves could contain `0` after an absent dimension was coerced
+    // through Number(null). Zero is not a usable print size, so migrate it
+    // back to the registry-controlled default.
+    printHeightMm: suppliedPrintHeight && suppliedPrintHeight > 0 ? suppliedPrintHeight : null,
+    printMinWidthMm: suppliedPrintMinWidth && suppliedPrintMinWidth > 0 ? suppliedPrintMinWidth : null,
     metadata: cloneValue(asObject(source.metadata)),
   };
 }
@@ -273,7 +292,7 @@ export function createWorksheet(overrides = {}, options = {}) {
     ...cloneValue(asObject(source.settings ?? source.globalSettings)),
   };
   settings.columns = settings.columns === 2 ? 2 : 1;
-  settings.orientation = 'portrait';
+  settings.orientation = settings.orientation === 'landscape' ? 'landscape' : 'portrait';
   settings.pageSize = 'A4';
   settings.marginMm = Math.min(25, Math.max(8, safeNumber(settings.marginMm, 12)));
 
@@ -490,7 +509,7 @@ export function worksheetReducer(state, action, options = {}) {
       const settings = { ...state.settings, ...cloneValue(patch) };
       settings.columns = settings.columns === 2 ? 2 : 1;
       settings.pageSize = 'A4';
-      settings.orientation = 'portrait';
+      settings.orientation = settings.orientation === 'landscape' ? 'landscape' : 'portrait';
       settings.marginMm = Math.min(25, Math.max(8, safeNumber(settings.marginMm, 12)));
       let blocks = state.blocks;
       if (settings.questionNumbering !== state.settings.questionNumbering) {
@@ -774,8 +793,20 @@ function writeJson(storage, key, value) {
 }
 
 function readProjectIndex(storage = getDefaultStorage()) {
-  const index = readJson(storage, PROJECT_INDEX_KEY, []);
-  return Array.isArray(index) ? index.filter((entry) => entry && typeof entry.id === 'string') : [];
+  const indexes = [PROJECT_INDEX_KEY, ...LEGACY_PROJECT_INDEX_KEYS]
+    .map((key) => readJson(storage, key, []))
+    .filter(Array.isArray);
+  const byId = new Map();
+  for (const index of indexes) {
+    for (const entry of index) {
+      if (!entry || typeof entry.id !== 'string') continue;
+      const existing = byId.get(entry.id);
+      if (!existing || String(entry.updatedAt ?? '').localeCompare(String(existing.updatedAt ?? '')) > 0) {
+        byId.set(entry.id, entry);
+      }
+    }
+  }
+  return [...byId.values()];
 }
 
 function updateProjectIndex(storage, worksheet) {
@@ -837,6 +868,10 @@ export function deleteProject(projectId, storage = getDefaultStorage()) {
     storage.removeItem(projectStorageKey(projectId));
     const index = readProjectIndex(storage).filter((entry) => entry.id !== projectId);
     writeJson(storage, PROJECT_INDEX_KEY, index);
+    for (const key of LEGACY_PROJECT_INDEX_KEYS) {
+      const legacy = readJson(storage, key, []);
+      if (Array.isArray(legacy)) writeJson(storage, key, legacy.filter((entry) => entry?.id !== projectId));
+    }
     if (storage.getItem(CURRENT_PROJECT_KEY) === projectId) storage.removeItem(CURRENT_PROJECT_KEY);
     return true;
   } catch {

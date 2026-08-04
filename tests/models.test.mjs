@@ -19,11 +19,14 @@ import {
 
 const familyIds = Object.values(MODEL_IDS);
 
-test("registry contains exactly the ten Build 1 model families", () => {
+test("registry preserves the ten Build 1 model families and extends them with the Build 2 bank", () => {
   assert.equal(familyIds.length, 10);
-  assert.deepEqual(Object.keys(MODEL_REGISTRY), familyIds);
-  assert.equal(listModelDefinitions().length, 10);
-  assert.equal(Object.keys(MODEL_RENDERERS).length, 10);
+  assert.deepEqual(Object.keys(MODEL_REGISTRY).slice(0, 10), familyIds);
+  assert.ok(listModelDefinitions().length > familyIds.length);
+  assert.ok(getModelDefinition('rounding-number-line'));
+  assert.ok(getModelDefinition('perimeter-trace'));
+  assert.ok(getModelDefinition('bar-chart'));
+  assert.ok(Object.keys(MODEL_RENDERERS).length >= 10);
 });
 
 test("every registry declaration provides the extensible model contract", () => {

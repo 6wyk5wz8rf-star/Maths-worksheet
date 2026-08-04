@@ -1,7 +1,8 @@
 {
   "name": "Maths Page Studio",
   "short_name": "Page Studio",
-  "description": "Turn copied mathematics questions into calm, accurate, printable worksheets.",
+  "description": "Turn copied mathematics questions into accurate, editable and printable pupil worksheets.",
+  "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

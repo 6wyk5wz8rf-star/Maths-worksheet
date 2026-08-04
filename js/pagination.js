@@ -1,3 +1,5 @@
+import { getBuild2ModelDefinition } from './build2-model-bank.js';
+
 /**
  * Deterministic A4 portrait pagination for Maths Page Studio.
  *
@@ -17,6 +19,15 @@ export const A4_PORTRAIT = Object.freeze({
   heightMm: 297,
   widthPx: 210 * PX_PER_MM,
   heightPx: 297 * PX_PER_MM,
+});
+
+export const A4_LANDSCAPE = Object.freeze({
+  name: 'A4',
+  orientation: 'landscape',
+  widthMm: 297,
+  heightMm: 210,
+  widthPx: 297 * PX_PER_MM,
+  heightPx: 210 * PX_PER_MM,
 });
 
 export const PAGINATION_DEFAULTS = Object.freeze({
@@ -72,6 +83,10 @@ export const RESPONSE_HEIGHT_MM = Object.freeze({
 });
 
 function finiteNumber(value, fallback) {
+  // Optional recipe values use null to mean “use the model default”.  Coercing
+  // null with Number() would turn that into zero and collapse every model to
+  // the minimum 8 mm print box.
+  if (value === null || value === undefined || value === '') return fallback;
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
@@ -113,17 +128,19 @@ function normaliseMargins(value) {
   };
 }
 
-/** Resolve the one supported print geometry. Landscape input is ignored safely. */
+/** Resolve fixed A4 geometry. Both orientations use the same millimetre layout engine. */
 export function getPageGeometry(worksheetOrSettings = {}, options = {}) {
   const settings = worksheetOrSettings.settings ?? worksheetOrSettings;
   const margins = normaliseMargins(options.margins ?? settings.margins ?? settings.marginMm);
   const columns = (options.columns ?? settings.columns) === 2 ? 2 : 1;
+  const orientation = (options.orientation ?? settings.orientation) === 'landscape' ? 'landscape' : 'portrait';
+  const page = orientation === 'landscape' ? A4_LANDSCAPE : A4_PORTRAIT;
   const gutterMm = clamp(finiteNumber(options.gutterMm, PAGINATION_DEFAULTS.gutterMm), 4, 12);
-  const contentWidthMm = A4_PORTRAIT.widthMm - margins.left - margins.right;
-  const contentHeightMm = A4_PORTRAIT.heightMm - margins.top - margins.bottom;
+  const contentWidthMm = page.widthMm - margins.left - margins.right;
+  const contentHeightMm = page.heightMm - margins.top - margins.bottom;
   const columnWidthMm = (contentWidthMm - (columns - 1) * gutterMm) / columns;
   return {
-    page: A4_PORTRAIT,
+    page,
     margins,
     columns,
     gutterMm,
@@ -217,7 +234,18 @@ function selectedModelForView(block, outputView) {
 
 export function estimateModelBox(model, availableWidthMm) {
   if (!model) return { heightMm: 0, widthMm: 0, warnings: [], metrics: null };
-  const metrics = modelMetrics(model.family);
+  const build2 = getBuild2ModelDefinition(model.family);
+  // The Build 2 renderer uses a consistent landscape SVG viewBox.  Reserve a
+  // height derived from the actual allotted width rather than squeezing it
+  // into the old Build 1 default box.  That keeps labels crisp in both A4
+  // orientations and when a model sits beside a question.
+  const metrics = build2
+    ? {
+      height: Math.min(62, Math.max(build2.print.minHeightMm ?? 24, Math.round(availableWidthMm * 0.34))),
+      minWidth: build2.print.minWidthMm ?? 62,
+      minHeight: build2.print.minHeightMm ?? 24,
+    }
+    : modelMetrics(model.family);
   const scale = SIZE_SCALE[model.size] ?? 1;
   const specifiedHeight = finiteNumber(model.printHeightMm, null);
   const heightMm = specifiedHeight == null ? metrics.height * scale : clamp(specifiedHeight, 8, 120);

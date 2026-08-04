@@ -1,5 +1,7 @@
 import { parseQuestions, extractMathInfo } from './parser.js';
 import { matchQuestionToModels, createModelRecipe as createMatchedRecipe, evaluateAnswerLeak } from './matcher.js';
+import { YEAR4_DOMAINS, QUESTION_FAMILIES, REPRESENTATION_PURPOSES } from './question-intelligence.js';
+import { BUILD2_MODEL_CATEGORIES, getBuild2ModelDefinition, searchBuild2Models } from './build2-model-bank.js';
 import {
   listModelDefinitions,
   getModelDefinition,
@@ -63,6 +65,9 @@ let ui = {
   editingId: null,
   editBuffer: '',
   browseModels: false,
+  modelSearch: '',
+  modelCategory: '',
+  editingInterpretation: false,
   inspectorOpen: false,
   navigatorOpen: false,
   dragging: null,
@@ -200,19 +205,124 @@ function parsedItemsToBlocks(parsed) {
   });
 }
 
+function modelBindingMode(model) {
+  if (!model) return 'none';
+  if (model.metadata?.binding?.mode === 'detached') return 'detached';
+  if (model.metadata?.binding?.mode === 'bound') return 'bound';
+  if (model.linked === false) return 'detached';
+  return 'bound';
+}
+
+function withModelBinding(recipe, mode = 'bound', teacherChosen = false) {
+  if (!recipe) return null;
+  const bound = mode !== 'detached';
+  return {
+    ...recipe,
+    linked: bound,
+    teacherChosen,
+    metadata: {
+      ...(recipe.metadata ?? {}),
+      binding: { ...(recipe.metadata?.binding ?? {}), mode: bound ? 'bound' : 'detached', source: 'question' },
+      linked: bound,
+      teacherChosen,
+    },
+  };
+}
+
+function matchForBlock(block, worksheet = store.getState()) {
+  return matchQuestionToModels(block.displayText, {
+    intent: worksheet.intent,
+    interpretationOverrides: block.extracted?.interpretationOverrides ?? {},
+  });
+}
+
+function safeBoundRecipe(match, worksheet, currentModel = null, options = {}) {
+  const currentFamily = options.preferCurrent && currentModel?.family ? currentModel.family : null;
+  const preferred = currentFamily
+    ? createMatchedRecipe(currentFamily, match.extracted, {
+      intent: worksheet.intent,
+      interpretation: match.interpretation,
+      interpretationOverrides: options.interpretationOverrides ?? {},
+      completionState: currentModel.completionState,
+      purpose: currentModel.purpose,
+      size: currentModel.size,
+      position: currentModel.position,
+    })
+    : null;
+  const source = preferred ?? match.provisionalRecipe ?? match.suggestions[0]?.recipe ?? null;
+  if (!source) return null;
+  const candidate = createRegistryRecipe(source.family, source);
+  const validation = validateRecipe(candidate, { intent: worksheet.intent });
+  return validation.valid ? withModelBinding(validation.normalizedRecipe, 'bound') : null;
+}
+
+function reanalyseQuestionBlock(block, options = {}) {
+  if (!block || block.kind !== 'question') return block;
+  const worksheet = store.getState();
+  const match = matchForBlock(block, worksheet);
+  const isBound = modelBindingMode(block.model) === 'bound';
+  const replaceChoice = Boolean(options.replaceChoice);
+  const nextModel = block.extracted?.modelChoice === 'none'
+    ? null
+    : (!block.model || isBound || replaceChoice)
+      ? safeBoundRecipe(match, worksheet, block.model, {
+        preferCurrent: isBound && !replaceChoice,
+        interpretationOverrides: block.extracted?.interpretationOverrides ?? {},
+      })
+      : block.model;
+  const mergeWarnings = [...(block.warnings ?? []), ...warningObjects(match.warnings)];
+  const warningsByCode = new Map(mergeWarnings.map((warning) => [warning.code, warning]));
+  return {
+    ...block,
+    extracted: {
+      ...match.extracted,
+      ...(block.extracted?.modelChoice ? { modelChoice: block.extracted.modelChoice } : {}),
+      ...(block.extracted?.interpretationOverrides ? { interpretationOverrides: block.extracted.interpretationOverrides } : {}),
+      recommendation: {
+        family: match.suggestions[0]?.family ?? null,
+        confidence: match.confidence,
+        needsReview: match.interpretation?.needsReview ?? false,
+      },
+    },
+    model: nextModel,
+    warnings: [...warningsByCode.values()],
+  };
+}
+
+function reanalyseCurrentBlock(options = {}) {
+  const block = selectedBlock();
+  if (!block || block.kind !== 'question') return;
+  store.dispatch(worksheetActions.updateBlock(block.id, reanalyseQuestionBlock(block, options)));
+}
+
 function buildFirstDraft() {
   const worksheet = store.getState();
   const blocks = worksheet.blocks.map((block) => {
     if (block.kind !== 'question') return block;
-    const match = matchQuestionToModels(block.extracted?.numericValues ? block.extracted : block.displayText, { intent: worksheet.intent });
+    const match = matchForBlock(block, worksheet);
     const alreadyComposed = Boolean(block.model) || Boolean(block.extracted?.modelChoice);
-    const proposedModel = match.provisionalRecipe ? createRegistryRecipe(match.provisionalRecipe.family, match.provisionalRecipe) : null;
-    const model = block.extracted?.modelChoice === 'none' ? null : block.model ?? proposedModel;
+    // Build 2 intentionally gives a useful first draft for a medium reading
+    // too, but the resulting card makes the reading easy to review.  The
+    // recipe itself remains pupil-safe and keeps required unknowns hidden.
+    const assessmentSafe = worksheet.intent !== 'assessment' || match.suggestions[0]?.answerRevealRisk === 'none';
+    const model = block.extracted?.modelChoice === 'none'
+      ? null
+      : block.model ?? (assessmentSafe ? safeBoundRecipe(match, worksheet, null, {
+        interpretationOverrides: block.extracted?.interpretationOverrides ?? {},
+      }) : null);
+    const warningList = [...(block.warnings ?? []), ...warningObjects(match.warnings)];
+    const warnings = [...new Map(warningList.map((warning) => [warning.code, warning])).values()];
     return {
       ...block,
       extracted: {
         ...match.extracted,
         ...(block.extracted?.modelChoice ? { modelChoice: block.extracted.modelChoice } : {}),
+        ...(block.extracted?.interpretationOverrides ? { interpretationOverrides: block.extracted.interpretationOverrides } : {}),
+        recommendation: {
+          family: match.suggestions[0]?.family ?? null,
+          confidence: match.confidence,
+          needsReview: match.interpretation?.needsReview ?? false,
+        },
       },
       model,
       response: alreadyComposed
@@ -220,7 +330,7 @@ function buildFirstDraft() {
         : model?.purpose === 'response-model'
           ? createResponseRecipe({ type: 'none', size: 'compact' })
           : responseForQuestion(block, worksheet.intent),
-      warnings: [...(block.warnings ?? []), ...warningObjects(match.warnings)],
+      warnings,
     };
   });
   store.dispatch(worksheetActions.replaceBlocks(blocks));
@@ -372,11 +482,14 @@ function formatFieldValue(value, type) {
   if (value == null) return '';
   if (type === 'fraction-list') return (Array.isArray(value) ? value : []).map((item) => `${item.numerator}/${item.denominator}`).join(', ');
   if (type === 'marker-list') return (Array.isArray(value) ? value : []).map((item) => `${item.value}:${item.label ?? item.value}`).join(', ');
+  if (type === 'table-rows') return (Array.isArray(value) ? value : []).map((row) => (Array.isArray(row) ? row.join(' | ') : String(row))).join('\n');
+  if (type === 'point-list') return (Array.isArray(value) ? value : []).map((point) => `${point.x}:${point.y}${point.label ? `:${point.label}` : ''}`).join(', ');
   if (Array.isArray(value)) return value.join(', ');
   return String(value);
 }
 
 function parseFieldValue(raw, type) {
+  if (type === 'boolean') return Boolean(raw);
   const value = String(raw).trim();
   if (['integer', 'number'].includes(type)) return value === '' ? null : Number(value.replaceAll(',', ''));
   if (['number-list', 'integer-list', 'digit-list'].includes(type)) {
@@ -395,6 +508,15 @@ function parseFieldValue(raw, type) {
       const [number, ...labelParts] = item.split(':');
       const markerValue = Number(number.replaceAll(',', ''));
       return { value: markerValue, label: labelParts.join(':').trim() || String(markerValue) };
+    });
+  }
+  if (type === 'table-rows') {
+    return value ? value.split(/\n+/).map((row) => row.split(/\s*\|\s*/).map((cell) => cell.trim())) : [];
+  }
+  if (type === 'point-list') {
+    return value.split(/\s*,\s*/).filter(Boolean).map((point, index) => {
+      const [x, y, label] = point.split(':').map((entry) => entry.trim());
+      return { x: Number(x), y: Number(y), label: label || String.fromCharCode(65 + index) };
     });
   }
   return value;
@@ -437,10 +559,17 @@ function renderEditorField(field, recipe) {
       </select>
     </div>`;
   }
-  const inputType = ['integer', 'number'].includes(field.type) ? 'number' : 'text';
-  return `<div class="field ${['fraction-list', 'marker-list', 'number-list', 'integer-list', 'digit-list', 'text-list'].includes(field.type) ? 'full' : ''}">
+  if (field.type === 'boolean') {
+    return `<div class="switch-row"><span>${escapeHtml(field.label)}</span><label class="switch"><input type="checkbox" data-role="model-field" data-path="${escapeAttr(field.key)}" data-type="boolean" ${value ? 'checked' : ''}><span></span></label></div>`;
+  }
+  const inputType = ['integer', 'number', 'decimal'].includes(field.type) ? 'number' : 'text';
+  const multiLine = ['table-rows'].includes(field.type);
+  const full = ['fraction-list', 'marker-list', 'number-list', 'integer-list', 'digit-list', 'text-list', 'table-rows', 'point-list'].includes(field.type);
+  return `<div class="field ${full ? 'full' : ''}">
     <label for="model-${escapeAttr(field.key)}">${escapeHtml(field.label)}</label>
-    <input id="model-${escapeAttr(field.key)}" type="${inputType}" value="${escapeAttr(formatFieldValue(value, field.type))}" data-role="model-field" data-path="${escapeAttr(field.key)}" data-type="${field.type}" ${field.min != null ? `min="${field.min}"` : ''} ${field.max != null ? `max="${field.max}"` : ''} ${field.optional ? '' : 'required'}>
+    ${multiLine
+      ? `<textarea id="model-${escapeAttr(field.key)}" data-role="model-field" data-path="${escapeAttr(field.key)}" data-type="${field.type}" ${field.optional ? '' : 'required'}>${escapeHtml(formatFieldValue(value, field.type))}</textarea>`
+      : `<input id="model-${escapeAttr(field.key)}" type="${inputType}" value="${escapeAttr(formatFieldValue(value, field.type))}" data-role="model-field" data-path="${escapeAttr(field.key)}" data-type="${field.type}" ${field.min != null ? `min="${field.min}"` : ''} ${field.max != null ? `max="${field.max}"` : ''} ${field.optional ? '' : 'required'}>`}
     ${hint ? `<span class="field-hint">${escapeHtml(hint)}</span>` : ''}
   </div>`;
 }
@@ -451,9 +580,9 @@ function safeRecipeForPreview(recipe, intent = store.getState().intent) {
   return result.recipe ?? recipe;
 }
 
-function modelSuggestionCard(suggestion, label = null) {
+function modelSuggestionCard(suggestion, label = null, instanceId = 'preview') {
   const recipe = createRegistryRecipe(suggestion.recipe.family, suggestion.recipe);
-  const preview = renderModelPreview(safeRecipeForPreview(recipe), { intent: store.getState().intent });
+  const preview = renderModelPreview(safeRecipeForPreview(recipe), { intent: store.getState().intent, instanceId: `${instanceId}-${recipe.family}` });
   return `<button type="button" class="suggestion-card" draggable="true" data-action="attach-model" data-family="${recipe.family}" data-drag-family="${recipe.family}">
     <span class="suggestion-preview">${preview}</span>
     <span class="suggestion-copy">
@@ -481,16 +610,17 @@ function manualRecipeFor(family, block) {
 function renderAttachedModel(block, worksheet) {
   const model = block.model;
   const definition = getModelDefinition(model.family);
+  const build2 = Boolean(getBuild2ModelDefinition(model.family));
+  const scaffold = build2 ? (model.scaffoldState ?? 'guided') : model.completionState;
+  const completionChoices = build2
+    ? [['blank', 'Blank'], ['guided', 'Guided'], ['modelled', 'Modelled']]
+    : [['blank', 'Blank'], ['partly-completed', 'Partly'], ['completed', 'Completed']];
   const validation = validateRecipe(model, { intent: worksheet.intent });
   const warnings = [...validation.warnings, ...validation.errors];
   return `<section class="inspector-section">
     <h3>${escapeHtml(definition?.name ?? 'Attached model')}</h3>
     <div class="choice-grid three" role="group" aria-label="Model completion state">
-      ${[
-        ['blank', 'Blank'],
-        ['partly-completed', 'Partly'],
-        ['completed', 'Completed'],
-      ].map(([value, label]) => `<button type="button" class="choice-button ${model.completionState === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="completionState" data-value="${value}">${label}</button>`).join('')}
+      ${completionChoices.map(([value, label]) => `<button type="button" class="choice-button ${scaffold === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="${build2 ? 'scaffoldState' : 'completionState'}" data-value="${value}">${label}</button>`).join('')}
     </div>
     ${worksheet.intent === 'assessment' && (model.completionState !== 'blank' || isAnswerRevealRisk(model, { intent: worksheet.intent })) ? `<div class="warning-card"><strong>Assessment check</strong><span>This model may reveal a method, relationship or answer. Keep it only if that support is intentional.</span></div>` : ''}
     <div class="inspector-section">
@@ -519,6 +649,10 @@ function renderAttachedModel(block, worksheet) {
       </div>
     </div>
     <div class="switch-row">
+      <span>${modelBindingMode(model) === 'bound' ? 'Linked to question' : 'Detached model'}<small class="field-hint">${modelBindingMode(model) === 'bound' ? ' Values update when the wording or reading changes.' : ' Custom values stay independent.'}</small></span>
+      <label class="switch"><input type="checkbox" data-role="model-binding-toggle" ${modelBindingMode(model) === 'bound' ? 'checked' : ''}><span></span></label>
+    </div>
+    <div class="switch-row">
       <span>Complete this model in the teacher version</span>
       <label class="switch"><input type="checkbox" data-role="teacher-model-toggle" ${block.teacher.completedModel ? 'checked' : ''}><span></span></label>
     </div>
@@ -526,6 +660,7 @@ function renderAttachedModel(block, worksheet) {
       <button type="button" class="secondary" data-action="browse-models">Replace model</button>
       <button type="button" class="ghost" data-action="remove-model" aria-label="Remove attached model">${icon('trash')}</button>
     </div>
+    <button type="button" class="ghost full-width" data-action="apply-similar-model" style="margin-top:6px">Apply this model to similar questions</button>
   </section>`;
 }
 
@@ -551,36 +686,106 @@ function renderResponseControls(block) {
   </section>`;
 }
 
-function renderModelChoices(block, worksheet) {
-  const match = matchQuestionToModels(block.extracted?.numericValues ? block.extracted : block.displayText, { intent: worksheet.intent });
-  const suggestions = match.suggestions;
-  if (ui.browseModels) {
-    return `<section class="inspector-section">
-      <div class="panel-header" style="margin:-14px -14px 12px;top:-14px">
-        <h2>All ten models</h2>
-        <button type="button" class="tool-button" data-action="close-model-browser" aria-label="Close model browser">×</button>
-      </div>
-      <div class="suggestion-list">
-        ${listModelDefinitions().map((definition) => {
-          const recipe = manualRecipeFor(definition.id, block);
-          return modelSuggestionCard({ recipe, label: definition.name, reason: definition.mathematicalPurpose }, definition.name);
-        }).join('')}
-      </div>
-    </section>`;
+function isBuild2Model(family) {
+  return Boolean(getBuild2ModelDefinition(family));
+}
+
+function bankDefinitionsForPicker() {
+  const query = ui.modelSearch.trim();
+  if (ui.modelCategory && ui.modelCategory !== 'Build 1 essentials') {
+    return searchBuild2Models(query, { category: ui.modelCategory });
   }
+  if (ui.modelCategory === 'Build 1 essentials') {
+    const lower = query.toLowerCase();
+    return listModelDefinitions().filter((definition) => !isBuild2Model(definition.id)).filter((definition) => !lower || [
+      definition.name, definition.purpose, ...(definition.matchingTags ?? []), definition.id,
+    ].join(' ').toLowerCase().includes(lower));
+  }
+  if (!query) return [];
+  const build2 = searchBuild2Models(query);
+  const legacy = listModelDefinitions().filter((definition) => !isBuild2Model(definition.id)).filter((definition) => [
+    definition.name, definition.purpose, ...(definition.matchingTags ?? []), definition.id,
+  ].join(' ').toLowerCase().includes(query.toLowerCase()));
+  return [...build2, ...legacy];
+}
+
+function renderModelBankPicker(block) {
+  const categories = ['Build 1 essentials', ...BUILD2_MODEL_CATEGORIES];
+  const results = bankDefinitionsForPicker();
+  const browseBody = (!ui.modelSearch.trim() && !ui.modelCategory)
+    ? `<div class="model-category-list">${categories.map((category) => {
+      const count = category === 'Build 1 essentials'
+        ? listModelDefinitions().filter((definition) => !isBuild2Model(definition.id)).length
+        : searchBuild2Models('', { category }).length;
+      return `<button type="button" class="model-category-button" data-action="choose-model-category" data-value="${escapeAttr(category)}"><span>${escapeHtml(category)}</span><small>${count} models</small></button>`;
+    }).join('')}</div>`
+    : results.length
+      ? `<div class="suggestion-list">${results.map((definition) => {
+        const recipe = manualRecipeFor(definition.id, block);
+        return modelSuggestionCard({ recipe, label: definition.name, reason: definition.childDescription ?? definition.mathematicalPurpose ?? definition.purpose }, definition.name, `bank-${definition.id}`);
+      }).join('')}</div>`
+      : '<p class="empty-bank">No model matches that search. Try “bar model”, “number line” or a curriculum category.</p>';
+  return `<section class="inspector-section model-bank-picker">
+    <div class="panel-header" style="margin:-14px -14px 12px;top:-14px">
+      <div><h2>Complete model bank</h2><span class="panel-count">Year 4</span></div>
+      <button type="button" class="tool-button" data-action="close-model-browser" aria-label="Close model browser">×</button>
+    </div>
+    <div class="field"><label for="model-bank-search">Find a model</label><input id="model-bank-search" type="search" data-role="model-search" value="${escapeAttr(ui.modelSearch)}" placeholder="bar model, counters, clock…"></div>
+    <div class="field" style="margin-top:8px"><label for="model-bank-category">Curriculum category</label><select id="model-bank-category" data-role="model-category"><option value="" ${!ui.modelCategory ? 'selected' : ''}>Browse categories</option>${categories.map((category) => `<option value="${escapeAttr(category)}" ${ui.modelCategory === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}</select></div>
+    ${ui.modelCategory || ui.modelSearch ? '<button type="button" class="ghost full-width" data-action="clear-model-bank-filter" style="margin-top:6px">Show all categories</button>' : ''}
+    <div class="model-bank-results">${browseBody}</div>
+  </section>`;
+}
+
+function renderModelChoices(block, worksheet) {
+  const match = matchForBlock(block, worksheet);
+  const suggestions = match.suggestions;
+  if (ui.browseModels) return renderModelBankPicker(block);
   return `<section class="inspector-section">
-    <h3>Models for this question</h3>
-    <p>${match.confidence === 'low' ? 'No reliable automatic match. Choose only if a representation genuinely helps.' : 'Tap a preview to attach it. The values come from this question.'}</p>
+    <h3>Best matches</h3>
+    <p>${match.confidence === 'low' ? 'This needs a quick teacher decision, so no automatic model has been assumed.' : match.confidence === 'medium' ? 'A useful first reading is attached, and it is marked for an easy review.' : 'A pupil-safe first representation has been selected from the question structure.'}</p>
     ${match.clarification ? `<div class="clarify-card"><strong>One quick check</strong><span>${escapeHtml(match.clarification)}</span><div class="clarify-actions"><button type="button" data-action="resolve-division" data-value="sharing">Sharing between groups</button><button type="button" data-action="resolve-division" data-value="grouping">Making groups of this size</button></div></div>` : ''}
     ${match.warnings.length ? `<div class="warning-card"><strong>Worth noticing</strong><span>${escapeHtml(match.warnings[0])}</span></div>` : ''}
     <div class="suggestion-list">
-      ${suggestions.map((suggestion, index) => modelSuggestionCard(suggestion, index === 0 ? `Best match · ${suggestion.label}` : index === 1 ? `Useful alternative · ${suggestion.label}` : `Another approach · ${suggestion.label}`)).join('')}
+      ${suggestions.map((suggestion, index) => modelSuggestionCard(suggestion, index === 0 ? `Best fit · ${suggestion.label}` : index === 1 ? `Strong alternative · ${suggestion.label}` : `Different useful approach · ${suggestion.label}`, `suggestion-${block.id}-${index}`)).join('')}
       <button type="button" class="suggestion-card" data-action="remove-model">
         <span class="suggestion-preview"><span style="font-size:24px;color:#777">∅</span></span>
         <span class="suggestion-copy"><strong>No model</strong><span>${escapeHtml(match.noModelOption.reason)}</span>${match.noModelRecommended ? '<span class="confidence">Recommended</span>' : ''}</span>
       </button>
     </div>
-    <button type="button" class="ghost full-width" data-action="browse-models" style="margin-top:8px">More models</button>
+    <button type="button" class="ghost full-width" data-action="browse-models" style="margin-top:8px">Complete bank</button>
+  </section>`;
+}
+
+function selectInterpretationOptions(values, selected, labels = {}) {
+  const available = [...new Set([selected, ...values].filter(Boolean))];
+  return `<option value="">Automatic</option>${available.map((value) => `<option value="${escapeAttr(value)}" ${selected === value ? 'selected' : ''}>${escapeHtml(labels[value] ?? humanOption(value))}</option>`).join('')}`;
+}
+
+function renderInterpretationControls(block, worksheet) {
+  const match = matchForBlock(block, worksheet);
+  const interpretation = block.extracted?.interpretation ?? match.interpretation;
+  const overrides = block.extracted?.interpretationOverrides ?? {};
+  const top = match.suggestions[0];
+  const structure = interpretation?.mathematicalStructure ?? {};
+  const unknownOptions = [
+    'whole', 'part', 'difference', 'larger-quantity', 'smaller-quantity', 'start', 'change', 'result',
+    'factor', 'group-size', 'group-count', 'numerator', 'denominator', 'rounded-value', 'converted-value',
+    'perimeter', 'area', 'hands', 'chart-data', 'comparison-symbol',
+  ];
+  const reason = top?.reason ?? 'Choose a representation only where it genuinely helps.';
+  return `<section class="inspector-section interpretation-panel ${interpretation?.needsReview ? 'needs-review' : ''}">
+    <h3>Question reading ${interpretation?.needsReview ? '<span class="confidence medium">Review</span>' : ''}</h3>
+    <p>This appears to be <strong>${escapeHtml(humanOption(interpretation?.questionFamily ?? 'question'))}</strong> in <strong>${escapeHtml(interpretation?.curriculumDomain ?? 'Mixed or multi-step')}</strong>. ${escapeHtml(reason)}</p>
+    ${ui.editingInterpretation ? `<div class="field-grid interpretation-fields">
+      <div class="field"><label for="interpret-domain">Domain</label><select id="interpret-domain" data-role="interpretation-field" data-key="domain">${selectInterpretationOptions(YEAR4_DOMAINS, overrides.domain || interpretation?.curriculumDomain)}</select></div>
+      <div class="field"><label for="interpret-operation">Operation</label><select id="interpret-operation" data-role="interpretation-field" data-key="operation">${selectInterpretationOptions(['addition', 'subtraction', 'multiplication', 'division'], overrides.operation || structure.operation)}</select></div>
+      <div class="field"><label for="interpret-family">Question family</label><select id="interpret-family" data-role="interpretation-field" data-key="questionFamily">${selectInterpretationOptions(QUESTION_FAMILIES, overrides.questionFamily || interpretation?.questionFamily)}</select></div>
+      <div class="field"><label for="interpret-unknown">Keep this unknown</label><select id="interpret-unknown" data-role="interpretation-field" data-key="unknownPosition">${selectInterpretationOptions(unknownOptions, overrides.unknownPosition || structure.unknownPosition)}</select></div>
+      <div class="field full"><label for="interpret-purpose">Representation purpose</label><select id="interpret-purpose" data-role="interpretation-field" data-key="representationPurpose">${selectInterpretationOptions(REPRESENTATION_PURPOSES, overrides.representationPurpose || interpretation?.representationPurpose)}</select></div>
+    </div>
+    <div class="inspector-actions"><button type="button" class="secondary" data-action="reset-interpretation">Use automatic reading</button><button type="button" class="ghost" data-action="toggle-interpretation">Done</button></div>`
+      : '<button type="button" class="ghost full-width" data-action="toggle-interpretation">Change interpretation</button>'}
   </section>`;
 }
 
@@ -596,6 +801,7 @@ function renderInspector(worksheet) {
   }
   return `<div class="inspector-content">
     <div class="field" style="margin-bottom:14px"><label for="selected-display-text">Printed question wording</label><textarea id="selected-display-text" data-role="question-display">${escapeHtml(block.displayText)}</textarea></div>
+    ${renderInterpretationControls(block, worksheet)}
     ${block.model && !ui.browseModels ? renderAttachedModel(block, worksheet) : renderModelChoices(block, worksheet)}
     ${renderResponseControls(block)}
     <section class="inspector-section">
@@ -671,7 +877,7 @@ function renderQuestionCore(block, placement, outputView) {
   const question = `<div class="question-row">${number}<p class="question-copy">${marks}${escapeHtml(block.displayText)}</p></div>`;
   if (!model) return question;
   const modelHeight = placement.measurement?.breakdown?.modelMm ?? 28;
-  const rendered = renderModel(model, { intent: store.getState().intent, outputView });
+  const rendered = renderModel(model, { intent: store.getState().intent, outputView, instanceId: `${block.id}-${outputView}` });
   const slot = `<div class="model-slot position-${position}" style="height:${modelHeight}mm" data-model-slot="${block.id}" aria-label="Attached ${escapeAttr(getModelDefinition(model.family)?.name ?? 'mathematical model')}">${rendered}</div>`;
   if (position === 'above') return `${slot}${question}`;
   if (position === 'beside') return `<div class="question-layout-beside">${question}${slot}</div>`;
@@ -725,9 +931,10 @@ function worksheetPageClass(worksheet) {
 
 function renderPage(worksheet, pagination, page, outputView, context = 'editor') {
   const shellContext = context === 'print-preview' ? 'print-preview' : 'editor-preview';
-  return `<div class="a4-shell" data-page-shell data-preview-context="${shellContext}">
+  const pageGeometry = pagination.geometry.page;
+  return `<div class="a4-shell" data-page-shell data-preview-context="${shellContext}" data-page-width-px="${pageGeometry.widthPx}" data-page-height-px="${pageGeometry.heightPx}" style="--mps-page-width:${pageGeometry.widthMm}mm;--mps-page-height:${pageGeometry.heightMm}mm">
     <span class="page-badge screen-only">Page ${page.number} of ${pagination.pageCount}</span>
-    <section class="${worksheetPageClass(worksheet)}" data-page-number="${page.number}" aria-label="Worksheet page ${page.number} of ${pagination.pageCount}" style="--sheet-accent:${escapeAttr(worksheet.settings.accentColor)}">
+    <section class="${worksheetPageClass(worksheet)} orientation-${pageGeometry.orientation}" data-page-number="${page.number}" aria-label="Worksheet page ${page.number} of ${pagination.pageCount}" style="--sheet-accent:${escapeAttr(worksheet.settings.accentColor)};--mps-page-width:${pageGeometry.widthMm}mm;--mps-page-height:${pageGeometry.heightMm}mm">
       ${page.number === 1 ? worksheetHeader(worksheet, pagination.geometry) : ''}
       ${page.items.map((placement) => {
         const block = worksheet.blocks.find((item) => item.id === placement.blockId);
@@ -762,6 +969,19 @@ function renderMake() {
           <button type="button" data-action="set-output-view" data-value="pupil" class="${worksheet.outputView === 'pupil' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'pupil'}">Pupil</button>
           <button type="button" data-action="set-output-view" data-value="teacher" class="${worksheet.outputView === 'teacher' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'teacher'}">Teacher</button>
         </div>
+        <span class="toolbar-divider"></span>
+        <details class="batch-menu">
+          <summary>Batch</summary>
+          <div class="batch-menu-panel">
+            <button type="button" data-action="attach-best-models">Attach best-fit models</button>
+            <button type="button" data-action="remove-all-models">Remove all models</button>
+            <button type="button" data-action="set-all-blank">Set all to Blank</button>
+            <button type="button" data-action="set-all-guided">Set all to Guided</button>
+            <button type="button" data-action="normalise-model-sizes">Normalise model sizes</button>
+            <button type="button" data-action="reanalyse-all">Reanalyse all</button>
+            <button type="button" class="batch-warning" data-action="replace-all-recommendations">Replace my choices</button>
+          </div>
+        </details>
         <span class="toolbar-divider"></span>
         <button type="button" class="icon-button" data-action="open-settings">${icon('settings')}<span class="settings-label">Page settings</span></button>
         <span class="toolbar-divider"></span>
@@ -834,7 +1054,7 @@ function renderPrint() {
       <aside class="print-controls" data-screen-only>
         <div class="print-card">
           <h2>${outputView === 'teacher' ? 'Teacher version' : 'Pupil version'}</h2>
-          <p>${worksheet.settings.colorMode === 'monochrome' ? 'Monochrome' : 'Colour'} · A4 portrait · ${pagination.pageCount} ${pagination.pageCount === 1 ? 'page' : 'pages'}</p>
+          <p>${worksheet.settings.colorMode === 'monochrome' ? 'Monochrome' : 'Colour'} · A4 ${pagination.geometry.page.orientation} · ${pagination.pageCount} ${pagination.pageCount === 1 ? 'page' : 'pages'}</p>
         </div>
         <div class="print-card">
           <h3>Page checks</h3>
@@ -881,7 +1101,7 @@ function renderSettingsContent() {
     </section>
     <section class="settings-group">
       <h3>Page</h3>
-      <div class="field"><label>A4 portrait</label><input value="210 × 297 mm" disabled aria-label="Page size A4 portrait"></div>
+      <div class="field"><label for="sheet-orientation">A4 orientation</label><select id="sheet-orientation" data-role="settings-select" data-key="orientation"><option value="portrait" ${settings.orientation === 'portrait' ? 'selected' : ''}>Portrait · 210 × 297 mm</option><option value="landscape" ${settings.orientation === 'landscape' ? 'selected' : ''}>Landscape · 297 × 210 mm</option></select></div>
       <div class="field"><label for="margin-size">Print-safe margin</label><select id="margin-size" data-role="settings-select" data-key="marginMm"><option value="10" ${settings.marginMm === 10 ? 'selected' : ''}>Narrow · 10 mm</option><option value="12" ${settings.marginMm === 12 ? 'selected' : ''}>Standard · 12 mm</option><option value="15" ${settings.marginMm === 15 ? 'selected' : ''}>Wide · 15 mm</option></select></div>
       <p style="margin:0;color:var(--muted);font-size:11px;line-height:1.45">Screen preview and print use the same fixed millimetre positions. Whole question blocks always move together.</p>
     </section>
@@ -920,14 +1140,16 @@ function updateHeader() {
 function scalePages() {
   document.querySelectorAll('[data-page-shell]').forEach((shell) => {
     const context = shell.dataset.previewContext;
-    const parentWidth = shell.parentElement?.clientWidth ?? PAGE_WIDTH_PX;
+    const pageWidth = Number(shell.dataset.pageWidthPx) || PAGE_WIDTH_PX;
+    const pageHeight = Number(shell.dataset.pageHeightPx) || PAGE_HEIGHT_PX;
+    const parentWidth = shell.parentElement?.clientWidth ?? pageWidth;
     const padding = context === 'print-preview' ? 10 : 4;
     const max = context === 'print-preview' ? 0.43 : 1;
-    const scale = Math.max(0.2, Math.min(max, (parentWidth - padding) / PAGE_WIDTH_PX));
+    const scale = Math.max(0.2, Math.min(max, (parentWidth - padding) / pageWidth));
     const page = shell.querySelector('.worksheet-page');
     page?.style.setProperty('--page-scale', String(scale));
-    shell.style.width = `${PAGE_WIDTH_PX * scale}px`;
-    shell.style.height = `${PAGE_HEIGHT_PX * scale}px`;
+    shell.style.width = `${pageWidth * scale}px`;
+    shell.style.height = `${pageHeight * scale}px`;
   });
 }
 
@@ -971,21 +1193,108 @@ function moveBlock(id, direction) {
   store.dispatch(worksheetActions.reorderBlock(id, target));
 }
 
+function validatedModelForBlock(recipe, worksheet, options = {}) {
+  const validation = validateRecipe(recipe, { intent: worksheet.intent });
+  if (!validation.valid) return { model: null, validation };
+  return {
+    model: withModelBinding(
+      validation.normalizedRecipe,
+      options.binding ?? modelBindingMode(recipe),
+      options.teacherChosen ?? Boolean(recipe.teacherChosen),
+    ),
+    validation,
+  };
+}
+
+function applyBatchModels(action) {
+  const worksheet = store.getState();
+  const targetScaffold = action === 'set-all-blank' ? 'blank' : action === 'set-all-guided' ? 'guided' : null;
+  const blocks = worksheet.blocks.map((block) => {
+    if (block.kind !== 'question') return block;
+    if (action === 'remove-all-models') return { ...block, model: null, extracted: { ...block.extracted, modelChoice: 'none' } };
+    if (action === 'attach-best-models') {
+      // A deliberate “No model” and an independently customised model are
+      // teacher decisions, so this batch action leaves them untouched.
+      if (block.extracted?.modelChoice === 'none' || modelBindingMode(block.model) === 'detached') return block;
+      return reanalyseQuestionBlock(block);
+    }
+    if (action === 'reanalyse-all') return reanalyseQuestionBlock(block);
+    if (action === 'replace-all-recommendations') return reanalyseQuestionBlock(block, { replaceChoice: true });
+    if (!block.model) return block;
+    if (action === 'normalise-model-sizes') {
+      const next = { ...block.model, size: 'standard' };
+      const { model } = validatedModelForBlock(next, worksheet, { binding: modelBindingMode(block.model), teacherChosen: block.model.teacherChosen });
+      return model ? { ...block, model } : block;
+    }
+    if (targetScaffold) {
+      const next = isBuild2Model(block.model.family)
+        ? { ...block.model, scaffoldState: targetScaffold }
+        : { ...block.model, completionState: targetScaffold === 'blank' ? 'blank' : 'partly-completed' };
+      const { model } = validatedModelForBlock(next, worksheet, { binding: modelBindingMode(block.model), teacherChosen: block.model.teacherChosen });
+      return model ? { ...block, model } : block;
+    }
+    return block;
+  });
+  store.dispatch(worksheetActions.replaceBlocks(blocks));
+  const messages = {
+    'attach-best-models': 'Best-fit models attached where a teacher choice was not already set.',
+    'remove-all-models': 'All models removed. The questions and response spaces remain.',
+    'set-all-blank': 'All attached models now use blank pupil scaffolds.',
+    'set-all-guided': 'All attached models now use guided pupil scaffolds.',
+    'normalise-model-sizes': 'Attached models set to a consistent standard size.',
+    'reanalyse-all': 'Questions reanalysed; teacher choices remain intact.',
+    'replace-all-recommendations': 'New recommendations replaced the existing model choices.',
+  };
+  toast(messages[action] ?? 'Batch change applied.');
+}
+
+function applyModelToSimilarQuestions() {
+  const worksheet = store.getState();
+  const selected = selectedBlock(worksheet);
+  if (!selected?.model) return;
+  const selectedReading = selected.extracted?.interpretation ?? matchForBlock(selected, worksheet).interpretation;
+  const blocks = worksheet.blocks.map((block) => {
+    if (block.kind !== 'question') return block;
+    const reading = block.extracted?.interpretation ?? matchForBlock(block, worksheet).interpretation;
+    if (reading.curriculumDomain !== selectedReading.curriculumDomain || reading.questionFamily !== selectedReading.questionFamily) return block;
+    const match = matchForBlock(block, worksheet);
+    const recipe = createMatchedRecipe(selected.model.family, match.extracted, {
+      intent: worksheet.intent,
+      interpretation: match.interpretation,
+      completionState: selected.model.completionState,
+      size: selected.model.size,
+      position: selected.model.position,
+      purpose: selected.model.purpose,
+    });
+    if (!recipe) return block;
+    const { model } = validatedModelForBlock(recipe, worksheet, { binding: 'bound', teacherChosen: true });
+    return model ? { ...block, model, extracted: { ...block.extracted, modelChoice: selected.model.family } } : block;
+  });
+  store.dispatch(worksheetActions.replaceBlocks(blocks));
+  toast('This teacher-selected model was applied to similar questions in this set.');
+}
+
+function updateQuestionWording(block, displayText) {
+  const text = String(displayText ?? '');
+  const changed = { ...block, displayText: text };
+  store.dispatch(worksheetActions.updateBlock(block.id, reanalyseQuestionBlock(changed)));
+}
+
 function attachModel(family) {
   const worksheet = store.getState();
   const block = selectedBlock(worksheet);
   if (!block || block.kind !== 'question') return;
   const recipe = manualRecipeFor(family, block);
-  const validation = validateRecipe(recipe, { intent: worksheet.intent });
-  if (!validation.valid) {
+  const { model, validation } = validatedModelForBlock(recipe, worksheet, { binding: 'bound', teacherChosen: true });
+  if (!model) {
     toast(validation.errors[0]?.message ?? 'That model cannot represent this question safely.', 'warning');
     return;
   }
-  if (worksheet.intent === 'assessment' && isAnswerRevealRisk(validation.normalizedRecipe, { intent: worksheet.intent })) {
+  if (worksheet.intent === 'assessment' && isAnswerRevealRisk(model, { intent: worksheet.intent })) {
     toast('Assessment check: this model may reveal part of the assessed thinking.', 'warning');
   }
   store.dispatch(worksheetActions.updateBlock(block.id, {
-    model: validation.normalizedRecipe,
+    model,
     extracted: { ...block.extracted, modelChoice: family },
   }));
   ui.browseModels = false;
@@ -996,15 +1305,15 @@ function updateModelField(path, rawValue, type) {
   const block = selectedBlock(worksheet);
   if (!block?.model) return;
   const next = setPath(block.model, path, parseFieldValue(rawValue, type));
-  const result = validateRecipe(next, { intent: worksheet.intent });
-  if (!result.valid) {
-    toast(result.errors[0]?.message ?? 'That change would break the model.', 'warning');
+  const { model, validation } = validatedModelForBlock(next, worksheet, { binding: 'detached', teacherChosen: true });
+  if (!model) {
+    toast(validation.errors[0]?.message ?? 'That change would break the model.', 'warning');
     render();
     return;
   }
-  store.dispatch(worksheetActions.setModel(block.id, result.normalizedRecipe));
+  store.dispatch(worksheetActions.setModel(block.id, model));
   if (block.teacher.completedModel) {
-    store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, completedModel: { ...result.normalizedRecipe, completionState: 'completed' } } }));
+    store.dispatch(worksheetActions.updateBlock(block.id, { teacher: { ...block.teacher, completedModel: { ...model, completionState: 'completed', scaffoldState: isBuild2Model(model.family) ? 'modelled' : model.scaffoldState } } }));
   }
 }
 
@@ -1032,25 +1341,22 @@ function resolveDivision(kind) {
   const worksheet = store.getState();
   const block = selectedBlock(worksheet);
   if (!block) return;
-  const values = (block.extracted?.numericValues ?? []).filter((value) => Number.isInteger(value) && value > 0);
-  const total = values[0] ?? 48;
-  const divisor = values[1] ?? 6;
-  const quotient = Number.isInteger(total / divisor) ? total / divisor : 1;
-  const recipe = createRegistryRecipe('equal-groups', {
-    variant: kind,
-    values: kind === 'sharing'
-      ? { total, groups: divisor, groupSize: quotient, layout: 'groups' }
-      : { total, groups: quotient, groupSize: divisor, layout: 'groups' },
-    unknown: kind === 'sharing' ? 'groupSize' : 'groups',
-    completionState: worksheet.intent === 'assessment' ? 'blank' : 'partly-completed',
-    purpose: 'response-model',
-  });
-  const result = validateRecipe(recipe, { intent: worksheet.intent });
-  if (result.valid) store.dispatch(worksheetActions.updateBlock(block.id, {
-    model: result.normalizedRecipe,
-    extracted: { ...block.extracted, modelChoice: 'equal-groups' },
+  const overrides = {
+    ...(block.extracted?.interpretationOverrides ?? {}),
+    operation: 'division',
+    unknownPosition: kind === 'sharing' ? 'group-size' : 'group-count',
+  };
+  const source = { ...block, extracted: { ...block.extracted, interpretationOverrides: overrides } };
+  const match = matchForBlock(source, worksheet);
+  const family = kind === 'sharing' ? 'sharing-division' : 'grouping-division';
+  const recipe = createMatchedRecipe(family, match.extracted, { intent: worksheet.intent, interpretation: match.interpretation });
+  const { model, validation } = validatedModelForBlock(recipe, worksheet, { binding: 'bound', teacherChosen: true });
+  if (model) store.dispatch(worksheetActions.updateBlock(block.id, {
+    ...reanalyseQuestionBlock(source),
+    model,
+    extracted: { ...source.extracted, ...match.extracted, interpretationOverrides: overrides, modelChoice: family },
   }));
-  else toast(result.errors[0]?.message ?? 'That grouping cannot be shown safely.', 'warning');
+  else toast(validation.errors[0]?.message ?? 'That grouping cannot be shown safely.', 'warning');
 }
 
 function moveBlockToPage(id, direction) {
@@ -1081,6 +1387,11 @@ document.addEventListener('input', (event) => {
     if (count) count.textContent = ui.rawDraft.length ? `${ui.rawDraft.length.toLocaleString()} characters` : 'Plain text';
   }
   if (event.target.matches('[data-role="edit-buffer"]')) ui.editBuffer = event.target.value;
+  if (event.target.matches('[data-role="model-search"]')) {
+    ui.modelSearch = event.target.value;
+    render();
+    requestAnimationFrame(() => document.querySelector('#model-bank-search')?.focus());
+  }
 });
 
 document.addEventListener('change', (event) => {
@@ -1091,9 +1402,37 @@ document.addEventListener('change', (event) => {
     const name = target.value.trim() || worksheet.metadata.title || 'Untitled worksheet';
     store.dispatch(worksheetActions.updateMetadata({ name }));
   } else if (target.matches('[data-role="question-display"]') && block) {
-    store.dispatch(worksheetActions.updateBlock(block.id, { displayText: target.value }));
+    updateQuestionWording(block, target.value);
   } else if (target.matches('[data-role="model-field"]')) {
-    updateModelField(target.dataset.path, target.value, target.dataset.type);
+    updateModelField(target.dataset.path, target.dataset.type === 'boolean' ? target.checked : target.value, target.dataset.type);
+  } else if (target.matches('[data-role="model-binding-toggle"]') && block?.model) {
+    if (target.checked) {
+      const match = matchForBlock(block, worksheet);
+      const model = safeBoundRecipe(match, worksheet, block.model, {
+        preferCurrent: true,
+        interpretationOverrides: block.extracted?.interpretationOverrides ?? {},
+      });
+      if (!model) toast('This model cannot be rebound safely to the current question.', 'warning');
+      else store.dispatch(worksheetActions.setModel(block.id, withModelBinding(model, 'bound', true)));
+    } else {
+      store.dispatch(worksheetActions.setModel(block.id, withModelBinding(block.model, 'detached', true)));
+    }
+  } else if (target.matches('[data-role="interpretation-field"]') && block) {
+    const key = target.dataset.key;
+    const overrides = { ...(block.extracted?.interpretationOverrides ?? {}) };
+    if (target.value) overrides[key] = target.value;
+    else delete overrides[key];
+    const source = { ...block, extracted: { ...block.extracted, interpretationOverrides: overrides } };
+    // Correcting the reading is an explicit request for the automatic draft
+    // to reconsider its representation. A teacher-selected or detached model
+    // remains their decision; an automatic bound model changes immediately.
+    const replaceAutomaticModel = modelBindingMode(block.model) === 'bound' && !block.model?.teacherChosen;
+    store.dispatch(worksheetActions.updateBlock(block.id, reanalyseQuestionBlock(source, {
+      replaceChoice: replaceAutomaticModel,
+    })));
+  } else if (target.matches('[data-role="model-category"]')) {
+    ui.modelCategory = target.value;
+    render();
   } else if (target.matches('[data-role="response-type"]') && block) {
     store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, type: target.value }));
   } else if (target.matches('[data-role="manual-break"]') && block) {
@@ -1163,7 +1502,8 @@ document.addEventListener('click', async (event) => {
     ui.editBuffer = '';
     render();
   } else if (action === 'save-block-edit') {
-    store.dispatch(worksheetActions.updateBlock(id, { displayText: ui.editBuffer }));
+    const block = store.getState().blocks.find((item) => item.id === id);
+    if (block) updateQuestionWording(block, ui.editBuffer);
     ui.editingId = null;
     ui.editBuffer = '';
     render();
@@ -1174,7 +1514,8 @@ document.addEventListener('click', async (event) => {
       toast('Place the cursor where the second card should begin.', 'warning');
       return;
     }
-    store.dispatch(worksheetActions.updateBlock(id, { displayText: ui.editBuffer }));
+    const block = store.getState().blocks.find((item) => item.id === id);
+    if (block) updateQuestionWording(block, ui.editBuffer);
     store.dispatch(worksheetActions.splitBlock(id, offset));
     ui.editingId = null;
     ui.editBuffer = '';
@@ -1197,9 +1538,20 @@ document.addEventListener('click', async (event) => {
     settingsDialog.showModal();
   } else if (action === 'browse-models') {
     ui.browseModels = true;
+    ui.modelSearch = '';
+    ui.modelCategory = '';
     render();
   } else if (action === 'close-model-browser') {
     ui.browseModels = false;
+    ui.modelSearch = '';
+    ui.modelCategory = '';
+    render();
+  } else if (action === 'choose-model-category') {
+    ui.modelCategory = button.dataset.value;
+    render();
+  } else if (action === 'clear-model-bank-filter') {
+    ui.modelSearch = '';
+    ui.modelCategory = '';
     render();
   } else if (action === 'attach-model') attachModel(button.dataset.family);
   else if (action === 'remove-model') {
@@ -1210,13 +1562,27 @@ document.addEventListener('click', async (event) => {
     const block = selectedBlock();
     if (!block?.model) return;
     const next = { ...block.model, [button.dataset.key]: button.dataset.value };
-    const validation = validateRecipe(next, { intent: store.getState().intent });
-    if (!validation.valid) toast(validation.errors[0]?.message ?? 'That model option is not safe.', 'warning');
-    else store.dispatch(worksheetActions.setModel(block.id, validation.normalizedRecipe));
+    const { model, validation } = validatedModelForBlock(next, store.getState(), { binding: modelBindingMode(block.model), teacherChosen: block.model.teacherChosen });
+    if (!model) toast(validation.errors[0]?.message ?? 'That model option is not safe.', 'warning');
+    else store.dispatch(worksheetActions.setModel(block.id, model));
   } else if (action === 'set-response-size') {
     const block = selectedBlock();
     if (block) store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, size: button.dataset.value }));
   } else if (action === 'resolve-division') resolveDivision(button.dataset.value);
+  else if (action === 'toggle-interpretation') {
+    ui.editingInterpretation = !ui.editingInterpretation;
+    render();
+  } else if (action === 'reset-interpretation') {
+    const block = selectedBlock();
+    if (block) {
+      const source = { ...block, extracted: { ...block.extracted, interpretationOverrides: {} } };
+      const replaceAutomaticModel = modelBindingMode(block.model) === 'bound' && !block.model?.teacherChosen;
+      store.dispatch(worksheetActions.updateBlock(block.id, reanalyseQuestionBlock(source, {
+        replaceChoice: replaceAutomaticModel,
+      })));
+    }
+  } else if (action === 'apply-similar-model') applyModelToSimilarQuestions();
+  else if (action === 'attach-best-models' || action === 'remove-all-models' || action === 'set-all-blank' || action === 'set-all-guided' || action === 'normalise-model-sizes' || action === 'reanalyse-all' || action === 'replace-all-recommendations') applyBatchModels(action);
   else if (action === 'set-accent') {
     store.dispatch(worksheetActions.updateSettings({ accentColor: button.dataset.value }));
     renderSettingsContent();

@@ -21,6 +21,7 @@ import {
   worksheetReducer,
 } from '../js/state.js';
 import {
+  A4_LANDSCAPE,
   A4_PORTRAIT,
   estimateWrappedLines,
   getPageGeometry,
@@ -30,6 +31,7 @@ import {
   placementStyle,
   pxToMm,
 } from '../js/pagination.js';
+import { matchQuestionToModels } from '../js/matcher.js';
 
 class MemoryStorage {
   constructor() {
@@ -394,4 +396,55 @@ test('pupil and teacher pagination can differ without mutating the worksheet', (
   assert.ok(teacher.placements.views.heightMm > pupil.placements.views.heightMm);
   assert.equal(worksheet.outputView, 'pupil');
   assert.equal(worksheet.blocks[0].model.completionState, 'blank');
+});
+
+test('Build 2 preserves landscape A4 settings and uses genuine landscape geometry', () => {
+  const worksheet = worksheetWith([question('landscape', 'Explain your method.')], {
+    settings: { orientation: 'landscape', columns: 2, marginMm: 12 },
+  });
+  const geometry = getPageGeometry(worksheet);
+  assert.equal(worksheet.settings.orientation, 'landscape');
+  assert.equal(geometry.page, A4_LANDSCAPE);
+  assert.equal(geometry.page.widthMm, 297);
+  assert.equal(geometry.page.heightMm, 210);
+  assert.ok(geometry.contentWidthMm > A4_PORTRAIT.widthMm - 24);
+});
+
+test('unconfigured Build 2 print dimensions use their safe registry metrics rather than an 8 mm fallback', () => {
+  const match = matchQuestionToModels('Round 3,462 to the nearest hundred.', { intent: 'practice' });
+  const block = question('rounding-safe', 'Round 3,462 to the nearest hundred.', {
+    model: match.provisionalRecipe,
+    response: { type: 'short-answer', size: 'standard' },
+  });
+  const worksheet = worksheetWith([block], { settings: { orientation: 'landscape', columns: 1, marginMm: 12 } });
+  const result = paginateWorksheet(worksheet);
+
+  assert.equal(block.model.printHeightMm, null);
+  assert.equal(block.model.printMinWidthMm, null);
+  assert.ok(result.placements['rounding-safe'].measurement.breakdown.modelMm >= 24);
+  assert.deepEqual(result.tooSmallModelBlockIds, []);
+
+  const migratedZeroDimensions = createQuestionBlock({
+    id: 'legacy-zero-dimensions', text: 'Round 3,462 to the nearest hundred.',
+    model: { ...match.provisionalRecipe, printHeightMm: 0, printMinWidthMm: 0 },
+  });
+  assert.equal(migratedZeroDimensions.model.printHeightMm, null);
+  assert.equal(migratedZeroDimensions.model.printMinWidthMm, null);
+});
+
+test('Build 2 project index retains a Build 1 project when first saving an upgraded worksheet', () => {
+  const storage = new MemoryStorage();
+  storage.setItem('maths-page-studio:projects:v1', JSON.stringify([{ id: 'build1-sheet', name: 'Build 1 sheet', updatedAt: NOW }]));
+  storage.setItem('maths-page-studio:project:build1-sheet', JSON.stringify({
+    version: 1,
+    metadata: { id: 'build1-sheet', name: 'Build 1 sheet', title: 'Build 1 sheet', createdAt: NOW, updatedAt: NOW },
+    originalImport: { rawText: '1. Calculate 2 + 2.' },
+    blocks: [],
+  }));
+  const build2 = worksheetWith([question('new-question', 'Calculate 3 + 4.')], {
+    metadata: { id: 'build2-sheet', name: 'Build 2 sheet', title: 'Build 2 sheet', createdAt: NOW, updatedAt: later(1) },
+  });
+  assert.equal(saveProject(build2, storage), true);
+  assert.deepEqual(listProjects(storage).map((item) => item.id).sort(), ['build1-sheet', 'build2-sheet']);
+  assert.equal(loadProject('build1-sheet', storage).version, WORKSHEET_VERSION);
 });

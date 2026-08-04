@@ -102,6 +102,23 @@ test('recognises bullets, section headings, shared instructions and mark allocat
   assert.equal(parsed.questions[0].sharedInstructionId, parsed.instructions[0].id);
 });
 
+test('preserves an explicit copied section label even without a blank line before it', () => {
+  const source = [
+    '1. Complete: □ × 7 = 56.',
+    'Reasoning',
+    '2. Explain how you know.',
+    'Statistics',
+    '3. Construct a bar chart.'
+  ].join('\n');
+  const parsed = parseQuestions(source);
+
+  assert.deepEqual(parsed.sections.map((section) => section.displayText), ['Reasoning', 'Statistics']);
+  assert.equal(parsed.questions.length, 3);
+  assert.equal(parsed.questions[0].displayText, 'Complete: □ × 7 = 56.');
+  assert.equal(parsed.questions[1].sectionId, parsed.sections[0].id);
+  assert.equal(parsed.questions[2].sectionId, parsed.sections[1].id);
+});
+
 test('splitQuestionAt performs an exact reversible split and rejects invalid indexes', () => {
   const source = 'First line\nSecond line';
   const [first, second] = splitQuestionAt(source, 11);
@@ -177,15 +194,16 @@ test('distinguishes additive part-whole and comparison bar relationships', () =>
 
 test('distinguishes sharing, grouping and ambiguous symbolic division', () => {
   const sharing = matchModels('24 sweets are shared equally between 6 children. How many does each receive?');
-  assert.equal(sharing.suggestions[0].family, 'equal-groups');
-  assert.equal(sharing.suggestions[0].recipe.variant, 'sharing');
-  assert.deepEqual(sharing.suggestions[0].recipe.values,
-    { total: 24, groupCount: 6, groupSize: null });
+  assert.equal(sharing.suggestions[0].family, 'sharing-division');
+  assert.equal(sharing.suggestions[0].recipe.values.total, 24);
+  assert.equal(sharing.suggestions[0].recipe.values.groups, 6);
+  assert.equal(sharing.suggestions[0].recipe.unknown, 'group-size');
 
   const grouping = matchModels('How many groups of 6 can be made from 48 counters?');
-  assert.equal(grouping.suggestions[0].recipe.variant, 'grouping');
-  assert.deepEqual(grouping.suggestions[0].recipe.values,
-    { total: 48, groupCount: null, groupSize: 6 });
+  assert.equal(grouping.suggestions[0].family, 'grouping-division');
+  assert.equal(grouping.suggestions[0].recipe.values.total, 48);
+  assert.equal(grouping.suggestions[0].recipe.values.groupSize, 6);
+  assert.equal(grouping.suggestions[0].recipe.unknown, 'group-count');
 
   const ambiguous = matchModels('Calculate 48 ÷ 6.');
   assert.equal(ambiguous.confidence, 'medium');
@@ -217,13 +235,12 @@ test('multiplicative altogether wording stays equal-groups rather than becoming 
   assert.equal(match.provisionalRecipe?.family, 'equal-groups');
 });
 
-test('fraction strips enforce positive denominators, equal parts and a constant whole', () => {
+test('fraction comparisons use an exact fraction number line while fraction strips remain valid', () => {
   const result = matchModels('Which is greater, 3/4 or 2/3? Use fraction strips.');
   const recipe = result.suggestions[0].recipe;
-  assert.equal(recipe.family, 'fraction-strip');
-  assert.equal(recipe.values.equalParts, true);
-  assert.equal(recipe.values.sameWhole, true);
-  assert.equal(recipe.values.divisions, 4);
+  assert.equal(recipe.family, 'fraction-number-line');
+  assert.equal(recipe.values.denominator, 4);
+  assert.equal(recipe.values.maxWhole, 1);
 
   const invalid = matchModels('Show the fraction 3/0.');
   assert.equal(invalid.suggestions.length, 0);
