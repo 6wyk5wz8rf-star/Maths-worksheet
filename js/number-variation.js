@@ -242,6 +242,27 @@ export function subtractionBorrowProfile(minuend, subtrahend) {
   };
 }
 
+/** Return the carry-out pattern for multiplication by one whole-number digit. */
+export function multiplicationCarryProfile(multiplicand, multiplier) {
+  if (!Number.isSafeInteger(multiplicand) || multiplicand < 0 || !Number.isInteger(multiplier) || multiplier < 1 || multiplier > 9) return null;
+  const digits = toLsdDigits(multiplicand, digitWidth(multiplicand));
+  const columns = [];
+  let carryIn = 0;
+  for (let position = 0; position < digits.length; position += 1) {
+    const product = digits[position] * multiplier + carryIn;
+    const carryOut = Math.floor(product / 10);
+    columns.push({ position, carryIn, carryOut, out: carryOut });
+    carryIn = carryOut;
+  }
+  return {
+    kind: 'multiplication-carry',
+    columns,
+    count: columns.filter((column) => column.carryOut > 0).length,
+    finalCarry: carryIn,
+    signature: columns.map((column) => column.carryOut).join(','),
+  };
+}
+
 /** Return exact bounds and the rounding side for a non-negative integer. */
 export function roundingProfile(target, magnitude) {
   if (!Number.isSafeInteger(target) || target < 0 || ![10, 100, 1000].includes(magnitude)) return null;
@@ -338,6 +359,7 @@ function operationAnalysis(questionText) {
         multiplierSide,
         multiplicandDigits: digitWidth(multiplicand),
         multiplierDigits: 1,
+        carryProfile: multiplicationCarryProfile(multiplicand, multiplier),
       },
     };
   }
@@ -571,20 +593,25 @@ function constructMultiplication(analysis, seed, options) {
   const multiplicandWidth = analysis.structure.multiplicandDigits;
   const preserveMultiplier = options.preserveMultiplier === true;
   const multiplierOptions = preserveMultiplier ? [multiplier] : [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  const range = sameWidthRange(multiplicandWidth, multiplicand === 0);
+  const desiredProfile = analysis.structure.carryProfile?.signature;
+  if (!range || !desiredProfile) return null;
   const candidates = [];
   for (const candidateMultiplier of multiplierOptions) {
-    const candidateMultiplicand = chooseSameWidthInteger(
-      multiplicand,
-      multiplicandWidth,
-      seed,
-      `multiplication:multiplicand:${candidateMultiplier}`
-    );
-    if (candidateMultiplicand !== null) {
+    const rangeLength = range.max - range.min + 1;
+    const checks = Math.min(rangeLength, 4096);
+    const start = seededIndex(checks, seed, `multiplication:multiplicand:${candidateMultiplier}`);
+    for (let offset = 0; offset < checks; offset += 1) {
+      const candidateMultiplicand = range.min + ((start + offset) % checks);
+      if (candidateMultiplicand === multiplicand && candidateMultiplier === multiplier) continue;
+      const profile = multiplicationCarryProfile(candidateMultiplicand, candidateMultiplier);
+      if (profile?.signature !== desiredProfile) continue;
       candidates.push({ multiplicand: candidateMultiplicand, multiplier: candidateMultiplier });
+      // A small deterministic sample is sufficient; retaining every possible
+      // number would add work without improving the mathematical constraint.
+      if (candidates.length >= 64) break;
     }
-    if (candidateMultiplier !== multiplier) {
-      candidates.push({ multiplicand, multiplier: candidateMultiplier });
-    }
+    if (candidates.length >= 64) break;
   }
   const chosen = selectCandidate(candidates, seed, 'multiplication:pair', (candidate) => (
     candidate.multiplicand !== multiplicand || candidate.multiplier !== multiplier
@@ -767,7 +794,7 @@ export function createSafeNumberVariation(questionText, options = {}) {
         { ...analysis.slots[0], value: formatLike(variation.left, analysis.slots[0].raw) },
         { ...analysis.slots[1], value: formatLike(variation.right, analysis.slots[1].raw) },
       ];
-      preserved = ['direct multiplication', 'one-digit multiplier', 'multiplicand digit width'];
+      preserved = ['direct multiplication', 'one-digit multiplier', 'multiplicand digit width', 'carry profile'];
     }
   } else if (analysis.type === 'division') {
     variation = constructDivision(analysis, seed);

@@ -15,6 +15,24 @@ export const BUILD1_FAMILY_REFERENCES = Object.freeze([
 
 export const BUILD2_SCAFFOLD_STATES = Object.freeze(['blank', 'guided', 'modelled']);
 export const BUILD2_PRINT_SIZES = Object.freeze(['compact', 'standard', 'large']);
+// The groups renderer draws every complete group and every item in that
+// group. Keep these limits beside validation and import them in the renderer
+// so a recipe can never be accepted at one capacity and silently truncated at
+// another.
+export const DIVISION_GROUP_VISUAL_LIMITS = Object.freeze({
+  maxGroups: 12,
+  maxItemsPerGroup: 16,
+});
+export const BUILD2_ROW_VISUAL_LIMITS = Object.freeze({
+  'editable-table': 8,
+  'tally-frequency-table': 8,
+  'bar-chart': 8,
+  pictogram: 6,
+  'line-graph': 10,
+});
+export const BUILD2_GRID_VISUAL_LIMIT = 20;
+export const MULTIPLICATION_BAR_VISUAL_LIMIT = 16;
+export const SCALING_BAR_VISUAL_LIMIT = 12;
 export const BUILD2_REPRESENTATION_PURPOSES = Object.freeze([
   'interpret-situation',
   'expose-structure',
@@ -782,7 +800,7 @@ function mergeRecipe(defaults, patch) {
 
 export function createBuild2ModelRecipe(family, patch = {}) {
   const definition = getBuild2ModelDefinition(family);
-  if (!definition) throw new RangeError(`Unknown Build 2 model family: ${family}`);
+  if (!definition) throw new RangeError(`Unknown mathematical model family: ${family}`);
   return mergeRecipe({
     recipeVersion: 2,
     family,
@@ -821,7 +839,11 @@ function normalizeNumberLine(values, warnings, errors) {
       warnings.push('The number-line range was expanded to a safe positive interval.');
     }
   }
-  let divisions = whole(values.divisions, values.jumpCount ?? 10);
+  const requestedDivisions = finite(values.divisions, finite(values.jumpCount, 10));
+  if (!Number.isInteger(requestedDivisions) || requestedDivisions < 1 || requestedDivisions > 50) {
+    errors.push('A printable number line needs 1 to 50 whole equal divisions.');
+  }
+  let divisions = whole(requestedDivisions, 10);
   divisions = Math.min(50, Math.max(1, divisions));
   values.start = start;
   values.end = end;
@@ -851,23 +873,31 @@ function normalizeFractions(values, warnings, errors) {
   }
 }
 
-function normalizeRows(values) {
-  const requestedCount = Number.isInteger(Number(values.rows)) ? Math.max(1, Math.min(12, whole(values.rows, 4))) : null;
+function normalizeRows(values, errors, family) {
+  const limit = BUILD2_ROW_VISUAL_LIMITS[family] ?? 8;
+  const suppliedCount = Number(values.rows);
+  const requestedCount = Number.isInteger(suppliedCount) ? Math.max(1, suppliedCount) : null;
   const rows = Array.isArray(values.rows)
     ? values.rows
     : requestedCount == null ? [] : Array.from({ length: requestedCount }, (_, index) => ({ label: `Row ${index + 1}`, value: '' }));
-  values.rows = rows.slice(0, 12).map((row, index) => ({
+  if (rows.length > limit) errors.push(`${family} can show at most ${limit} complete rows without omitting data.`);
+  values.rows = rows.slice(0, limit).map((row, index) => ({
     label: String(row?.label ?? `Item ${index + 1}`).slice(0, 50),
     value: Math.max(0, finite(row?.value, 0)),
   }));
 }
 
 function normalizeGrid(values, errors) {
-  const rows = whole(values.rows ?? values.height, 4);
-  const columns = whole(values.columns ?? values.width, 4);
-  values.rows = Math.min(30, Math.max(1, rows));
-  values.columns = Math.min(30, Math.max(1, columns));
-  if (values.rows * values.columns > 900) errors.push('A printable grid cannot contain more than 900 visible cells.');
+  const rawRows = finite(values.rows ?? values.height, NaN);
+  const rawColumns = finite(values.columns ?? values.width, NaN);
+  if (!Number.isInteger(rawRows) || !Number.isInteger(rawColumns) || rawRows < 1 || rawColumns < 1) {
+    errors.push('A printable grid needs positive whole-number rows and columns.');
+  }
+  if (rawRows > BUILD2_GRID_VISUAL_LIMIT || rawColumns > BUILD2_GRID_VISUAL_LIMIT) {
+    errors.push(`A printable grid can show at most ${BUILD2_GRID_VISUAL_LIMIT} rows and ${BUILD2_GRID_VISUAL_LIMIT} columns without changing the array.`);
+  }
+  values.rows = Math.min(BUILD2_GRID_VISUAL_LIMIT, Math.max(1, whole(rawRows, 4)));
+  values.columns = Math.min(BUILD2_GRID_VISUAL_LIMIT, Math.max(1, whole(rawColumns, 4)));
 }
 
 function normalizeGeometry(recipe, warnings, errors) {
@@ -896,17 +926,19 @@ function normalizeGeometry(recipe, warnings, errors) {
     case 'fraction-area':
     case 'fraction-set':
     case 'decimal-grid':
+      if (recipe.family === 'equivalent-fraction-strips' && Array.isArray(values.fractions) && values.fractions.length > 4) {
+        errors.push('Equivalent-fraction strips can show at most four complete fractions without omitting a row.');
+      }
       normalizeFractions(values, warnings, errors);
       break;
     case 'grid':
-    case 'area-grid':
       normalizeGrid(values, errors);
       break;
     case 'table':
     case 'bar-chart':
     case 'pictogram':
     case 'line-graph':
-      normalizeRows(values);
+      normalizeRows(values, errors, recipe.family);
       break;
     default:
       break;
@@ -951,12 +983,23 @@ function exactEqual(left, right) {
 
 function validateRelationships(recipe, errors) {
   const values = recipe.values;
-  if (recipe.family === 'number-bond') {
+  if (recipe.family === 'number-bond' || recipe.family === 'partition-tree') {
     const parts = Array.isArray(values.parts) ? values.parts.map((part) => finite(part, null)) : [];
     const whole = finite(values.whole, null);
-    if (!parts.length || parts.some((part) => part == null) || whole == null || !exactEqual(parts.reduce((sum, part) => sum + part, 0), whole)) {
-      errors.push('A number bond’s parts must add exactly to its whole.');
+    if (parts.length < 2 || parts.length > 6 || parts.some((part) => part == null || part < 0) || whole == null || !exactEqual(parts.reduce((sum, part) => sum + part, 0), whole)) {
+      errors.push(`${recipe.family === 'number-bond' ? 'A number bond' : 'A partition tree'} needs two to six non-negative parts that add exactly to its whole.`);
     }
+  }
+  if (recipe.family === 'ordering-comparison-line' && (!Array.isArray(values.numbers) || values.numbers.length < 2 || values.numbers.length > 5)) {
+    errors.push('An ordering and comparison line can show two to five complete number cards without clipping them.');
+  }
+  if (recipe.family === 'arrow-card-builder') {
+    const number = finite(values.number, null);
+    if (!Number.isInteger(number) || number < 0 || number > 9999) errors.push('Arrow cards support whole numbers from 0 to 9,999 without dropping digits.');
+  }
+  if (recipe.family === 'roman-numeral-builder') {
+    const number = finite(values.number, null);
+    if (!Number.isInteger(number) || number < 1 || number > 100) errors.push('The Roman-numeral builder supports whole numbers from 1 to 100.');
   }
   if (recipe.family === 'change-bar') {
     const start = finite(values.start, null); const change = finite(values.change, null); const result = finite(values.result, null);
@@ -964,16 +1007,60 @@ function validateRelationships(recipe, errors) {
   }
   if (recipe.family === 'multiplication-bar') {
     const groups = finite(values.groups, null); const groupSize = finite(values.groupSize, null); const total = finite(values.total, null);
-    if (groups == null || groupSize == null || total == null || !exactEqual(groups * groupSize, total)) errors.push('A multiplication bar’s total must equal groups times group size.');
+    if (!Number.isInteger(groups) || groups < 1 || groups > MULTIPLICATION_BAR_VISUAL_LIMIT || groupSize == null || groupSize <= 0 || total == null || !exactEqual(groups * groupSize, total)) {
+      errors.push(`A multiplication bar needs 1 to ${MULTIPLICATION_BAR_VISUAL_LIMIT} whole groups and a total equal to groups times group size.`);
+    }
   }
   if (recipe.family === 'scaling-bar') {
     const original = finite(values.original, null); const multiplier = finite(values.multiplier, null); const scaled = finite(values.scaled, null);
-    if (original == null || multiplier == null || scaled == null || !exactEqual(original * multiplier, scaled)) errors.push('A scaling bar’s scaled value must equal original times multiplier.');
+    if (original == null || !Number.isInteger(multiplier) || multiplier < 1 || multiplier > SCALING_BAR_VISUAL_LIMIT || scaled == null || !exactEqual(original * multiplier, scaled)) {
+      errors.push(`A scaling bar needs a whole-number multiplier from 1 to ${SCALING_BAR_VISUAL_LIMIT}, and its scaled value must equal original times multiplier.`);
+    }
   }
   if (recipe.family === 'short-division') {
     const dividend = whole(values.dividend, NaN); const divisor = whole(values.divisor, NaN); const quotient = values.quotient == null ? null : whole(values.quotient, NaN); const remainder = values.remainder == null ? null : whole(values.remainder, NaN);
-    if (!Number.isInteger(dividend) || !Number.isInteger(divisor) || divisor < 1) errors.push('Short division needs a positive whole divisor and whole dividend.');
-    if (quotient != null && remainder != null && (!Number.isInteger(quotient) || !Number.isInteger(remainder) || remainder < 0 || remainder >= divisor || quotient * divisor + remainder !== dividend)) errors.push('Short division quotient and remainder must reconstruct the dividend exactly.');
+    if (!Number.isInteger(dividend) || dividend < 0 || !Number.isInteger(divisor) || divisor < 1) {
+      errors.push('Short division needs a non-negative whole dividend and positive whole divisor.');
+    } else {
+      const expectedQuotient = Math.floor(dividend / divisor);
+      const expectedRemainder = dividend % divisor;
+      if (quotient != null && (!Number.isInteger(quotient) || quotient !== expectedQuotient)) errors.push('A supplied short-division quotient must be the exact whole-number quotient.');
+      if (remainder != null && (!Number.isInteger(remainder) || remainder !== expectedRemainder)) errors.push('A supplied short-division remainder must be the exact remainder and smaller than the divisor.');
+    }
+  }
+  if (['compact-column-addition', 'expanded-column-addition', 'compact-column-subtraction', 'expanded-column-subtraction'].includes(recipe.family)) {
+    const operands = Array.isArray(values.operands) ? values.operands : [];
+    if (operands.length < 2 || operands.length > 4 || operands.some((operand) => !Number.isInteger(finite(operand, NaN)) || finite(operand, -1) < 0)) {
+      errors.push('A printable column frame needs two to four non-negative whole-number operands.');
+    }
+  }
+  if (['short-multiplication', 'place-value-multiplication'].includes(recipe.family)) {
+    const number = finite(values.number, null);
+    const multiplier = finite(values.multiplier, null);
+    if (!Number.isInteger(number) || number < 0 || !Number.isInteger(multiplier) || multiplier < 1 || multiplier > 9) {
+      errors.push('Short multiplication needs a non-negative whole multiplicand and a one-digit positive multiplier.');
+    }
+  }
+  if (recipe.family === 'factor-pair-array') {
+    const number = finite(values.number, null);
+    if (!Number.isInteger(number) || number < 1 || number > 100) errors.push('The factor-pair explorer supports whole numbers from 1 to 100.');
+  }
+  if (['sharing-division', 'grouping-division', 'remainder-model'].includes(recipe.family)) {
+    const total = finite(values.total, NaN);
+    const sharing = recipe.family === 'sharing-division';
+    const groupValue = finite(sharing ? values.groups : values.groupSize, NaN);
+    if (!Number.isInteger(total) || total < 0 || !Number.isInteger(groupValue) || groupValue < 1) {
+      errors.push(`${sharing ? 'Sharing' : 'Grouping'} division needs a non-negative whole total and a positive whole ${sharing ? 'recipient count' : 'group size'}.`);
+    } else {
+      const groupCount = sharing ? groupValue : Math.floor(total / groupValue);
+      const itemsPerGroup = sharing ? Math.floor(total / groupValue) : groupValue;
+      if (groupCount > DIVISION_GROUP_VISUAL_LIMITS.maxGroups) {
+        errors.push(`This model can show at most ${DIVISION_GROUP_VISUAL_LIMITS.maxGroups} complete groups without omitting groups.`);
+      }
+      if (groupCount > 0 && itemsPerGroup > DIVISION_GROUP_VISUAL_LIMITS.maxItemsPerGroup) {
+        errors.push(`This model can show at most ${DIVISION_GROUP_VISUAL_LIMITS.maxItemsPerGroup} items in each complete group without omitting items.`);
+      }
+    }
   }
   if (recipe.family === 'fraction-set-model') {
     const total = whole(values.total, NaN); const denominator = whole(values.denominator, NaN);
@@ -1035,6 +1122,11 @@ function validateRelationships(recipe, errors) {
     if (price != null && (!Number.isInteger(price) || price < 0)) errors.push('A price must be a non-negative whole pence value.');
     if (tendered != null && (!Number.isInteger(tendered) || tendered < 0)) errors.push('A tendered amount must be a non-negative whole pence value.');
     if (price != null && tendered != null && tendered < price) errors.push('A change model needs the paid amount to be at least the price.');
+    if (amount != null && Number.isInteger(amount) && amount >= 0 && !(price != null && tendered != null)) {
+      let remaining = amount;
+      for (const coin of [200, 100, 50, 20, 10, 5, 2, 1]) remaining -= Math.min(4, Math.floor(remaining / coin)) * coin;
+      if (remaining !== 0) errors.push('This amount needs more than four of one coin; use a change card or a smaller exact coin representation.');
+    }
   }
   if (recipe.family === 'pictogram') {
     const key = finite(values.key, null);
@@ -1049,6 +1141,7 @@ function validateRelationships(recipe, errors) {
         return exactEqual(symbols, Math.round(symbols)) || exactEqual(symbols * 2, Math.round(symbols * 2));
       });
       if (!canUseHalfSymbol) errors.push('A pictogram can only use whole or half symbols for the selected key.');
+      if (rows.some((row) => finite(row?.value, 0) / key > 20.5)) errors.push('A pictogram row can show at most 20 whole symbols and one half symbol without omitting data.');
     }
   }
   if (recipe.family === 'bar-chart' || recipe.family === 'line-graph') {
@@ -1072,12 +1165,26 @@ function validateRelationships(recipe, errors) {
       }
     }
   }
+  if (recipe.family === 'symmetry-grid') {
+    const size = finite(values.size, null);
+    if (!Number.isInteger(size) || size < 4 || size > 16) errors.push('A symmetry grid needs a whole-number size from 4 to 16.');
+  }
+  if (recipe.family === 'squared-working-area') {
+    const rows = finite(values.rows, null); const columns = finite(values.columns, null);
+    if (!Number.isInteger(rows) || rows < 3 || rows > 16 || !Number.isInteger(columns) || columns < 4 || columns > 24) {
+      errors.push('Squared working supports 3 to 16 rows and 4 to 24 columns without changing the grid.');
+    }
+  }
+  if (recipe.family === 'lined-explanation-area') {
+    const lines = finite(values.lines, null);
+    if (!Number.isInteger(lines) || lines < 2 || lines > 10) errors.push('A lined explanation area supports 2 to 10 complete writing lines.');
+  }
 }
 
 export function normalizeBuild2ModelRecipe(input, options = {}) {
   if (!input || typeof input !== 'object') return { recipe: null, warnings: [], errors: ['A model recipe is required.'] };
   const definition = getBuild2ModelDefinition(input.family);
-  if (!definition) return { recipe: null, warnings: [], errors: [`Unknown Build 2 model family: ${input.family ?? 'missing'}.`] };
+  if (!definition) return { recipe: null, warnings: [], errors: [`Unknown mathematical model family: ${input.family ?? 'missing'}.`] };
   const recipe = createBuild2ModelRecipe(definition.id, input);
   const warnings = [];
   const errors = [];

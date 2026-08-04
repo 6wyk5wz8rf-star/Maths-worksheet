@@ -413,11 +413,20 @@ export function extractMathInfo(text) {
 
   collectPattern(
     source,
-    /\b([01]?\d|2[0-3]):([0-5]\d)\b/g,
+    /\b([01]?\d|2[0-3]):([0-5]\d)(?:\s*(am|pm))?\b/gi,
     'time',
     occupied,
     quantities,
-    (match) => ({ raw: match[0], hours: Number(match[1]), minutes: Number(match[2]), value: match[0] })
+    (match) => {
+      const sourceHours = Number(match[1]);
+      const minutes = Number(match[2]);
+      const meridiem = match[3]?.toLowerCase() ?? null;
+      if (meridiem && (sourceHours < 1 || sourceHours > 12)) return null;
+      let hours = sourceHours;
+      if (meridiem === 'pm' && hours !== 12) hours += 12;
+      if (meridiem === 'am' && hours === 12) hours = 0;
+      return { raw: match[0], hours, sourceHours, minutes, meridiem, value: match[0] };
+    }
   );
 
   collectPattern(
@@ -427,6 +436,14 @@ export function extractMathInfo(text) {
     occupied,
     quantities,
     (match) => {
+      const operatorSpaced = /\s\/\s/.test(match[0]);
+      const after = source.slice(match.index + match[0].length);
+      const explicitFractionContext = /^\s+of\b/i.test(after)
+        || /\b(?:fraction|numerator|denominator|equivalent)\b/i.test(source);
+      // In a direct calculation, whitespace on both sides makes `/` an
+      // operator. Compact forms such as 3/4 remain fractions, as do explicit
+      // fraction-of-quantity and fraction-vocabulary questions.
+      if (operatorSpaced && !explicitFractionContext) return null;
       const numerator = normaliseNumber(match[1]);
       const denominator = normaliseNumber(match[2]);
       if (denominator === 0) warnings.push(`The source contains an undefined fraction: ${match[0]}.`);

@@ -239,14 +239,19 @@ function responseHeightMm(response = {}, density = 'standard') {
   const type = RESPONSE_HEIGHT_MM[response.type] ? response.type : 'open-box';
   const size = ({ small: 'compact', medium: 'standard', large: 'generous' })[response.size] ?? (['compact', 'standard', 'generous'].includes(response.size) ? response.size : 'standard');
   let height = RESPONSE_HEIGHT_MM[type][size];
+  let fixedRowMinimumMm = 0;
   if (['writing-lines', 'lined-explanation', 'prove-it'].includes(type) && Number.isFinite(Number(response.lines))) {
     height = clamp(Number(response.lines), 1, 14) * 6;
   }
   if (Number.isFinite(Number(response.customRows)) && Number(response.customRows) > 0) height = clamp(Number(response.customRows), 1, 14) * 6;
   if (Number.isFinite(Number(response.rows)) && Number(response.rows) > 0 && ['table-completion', 'diagram-construction', 'labelled-steps'].includes(type)) {
-    height = Math.max(height, clamp(Number(response.rows), 1, 14) * 5.4);
+    const rowCount = clamp(Number(response.rows), 1, ['table-completion', 'labelled-steps'].includes(type) ? 20 : 14);
+    // Table and labelled-step rows have a fixed 7 mm CSS minimum. Density may
+    // add space but must never scale the container below the sum of its rows.
+    fixedRowMinimumMm = ['table-completion', 'labelled-steps'].includes(type) ? rowCount * 7 : 0;
+    height = Math.max(height, fixedRowMinimumMm || rowCount * 5.4);
   }
-  return height * (DENSITY_SCALE[density] ?? 1);
+  return Math.max(fixedRowMinimumMm, height * (DENSITY_SCALE[density] ?? 1));
 }
 
 function selectedModelForView(block, outputView) {
@@ -296,6 +301,7 @@ function blockWarning(code, message, details = {}) {
 export function measureQuestionBlock(block, availableWidthMm, options = {}) {
   const density = options.density ?? 'standard';
   const outputView = options.outputView ?? 'pupil';
+  const footprint = compositionFootprint(block);
   const innerWidthMm = Math.max(20, availableWidthMm - 6);
   const warnings = [];
 
@@ -334,7 +340,10 @@ export function measureQuestionBlock(block, availableWidthMm, options = {}) {
   const modelBox = estimateModelBox(model, modelWidthMm);
   warnings.push(...modelBox.warnings);
   const responseMm = responseHeightMm(block.response, density);
-  const gapMm = density === 'compact' ? 2.2 : density === 'spacious' ? 4 : 3;
+  const densityGapMm = density === 'compact' ? 2.2 : density === 'spacious' ? 4 : 3;
+  const gapMm = footprint === 'compact'
+    ? Math.max(1.6, densityGapMm - 1)
+    : footprint === 'spacious' ? densityGapMm + 2 : densityGapMm;
   let coreMm;
   if (!model) coreMm = questionMm;
   else if (beside) coreMm = Math.max(questionMm, modelBox.heightMm);
@@ -376,7 +385,14 @@ export function measureQuestionBlock(block, availableWidthMm, options = {}) {
     warnings.push({ ...warning });
   }
 
-  const paddingMm = density === 'compact' ? 3 : density === 'spacious' ? 5 : 4;
+  const densityPaddingMm = density === 'compact' ? 3 : density === 'spacious' ? 5 : 4;
+  // Footprints are teacher-facing composition sizes, so they must alter the
+  // printable block rather than acting as labels only. Compact removes safe
+  // air (never content); Spacious adds calm working room. Standard preserves
+  // the established measurement.
+  const paddingMm = footprint === 'compact'
+    ? Math.max(2, densityPaddingMm - 2)
+    : footprint === 'spacious' ? densityPaddingMm + 4 : densityPaddingMm;
   const heightMm = paddingMm * 2 + coreMm + (supportMm ? gapMm + supportMm : 0) + (responseMm ? gapMm + responseMm : 0) + teacherMm;
   return {
     blockId: block.id,
@@ -391,6 +407,7 @@ export function measureQuestionBlock(block, availableWidthMm, options = {}) {
       responseMm,
       teacherMm,
       position,
+      footprint,
     },
     warnings,
   };
@@ -452,7 +469,18 @@ function compositionFootprint(block) {
 
 function sectionStartRule(worksheet, block) {
   const section = (worksheet.architecture?.sections ?? []).find((item) => item.id === block.section);
-  return Boolean(section?.startOnNewPage);
+  if (!section?.startOnNewPage) return false;
+  const heading = section.headingId
+    ? worksheet.blocks.find((candidate) => candidate.id === section.headingId)
+    : null;
+  const first = heading ?? worksheet.blocks.find((candidate) => candidate.section === section.id);
+  return first?.id === block.id;
+}
+
+function sectionUsesRows(worksheet, block) {
+  const section = (worksheet.architecture?.sections ?? []).find((item) => item.id === block.section);
+  if (section) return section.layout === 'rows';
+  return worksheet.architecture?.compositionMode === 'rows';
 }
 
 function needsFullWidth(block) {
@@ -464,9 +492,24 @@ function needsFullWidth(block) {
     || block.model?.metadata?.requiresFullWidth === true;
 }
 
-function mayUseHalfWidth(block) {
+function mayUseHalfWidth(block, worksheet = null) {
   if (block?.kind !== 'question' || needsFullWidth(block)) return false;
+  if (worksheet && !sectionUsesRows(worksheet, block)) return false;
   return compositionFootprint(block) === 'half' || block.layout?.columnSpan === 'half';
+}
+
+function fillPageMeasurement(block, measurement, availableHeightMm) {
+  if (compositionFootprint(block) !== 'page' || !Number.isFinite(availableHeightMm)) return measurement;
+  const heightMm = Math.max(measurement.heightMm, Math.max(0, availableHeightMm));
+  return {
+    ...measurement,
+    heightMm: Math.round(heightMm * 100) / 100,
+    breakdown: {
+      ...measurement.breakdown,
+      footprint: 'page',
+      footprintFillMm: Math.max(0, Math.round((heightMm - measurement.heightMm) * 100) / 100),
+    },
+  };
 }
 
 function addPlacementWarning(page, warnings, blockId, placement, measurement) {
@@ -502,7 +545,15 @@ function buildPaginationResult(geometry, outputView, pages, placements, warnings
       currentPage.warnings.push(warning);
       warnings.push(warning);
     }
-    if (currentPage.items.length && currentPage.utilisation < 0.16 && currentPage.number !== pages.length) {
+    if (!currentPage.items.length && pages.length > 1) {
+      const warning = blockWarning(
+        'page-empty',
+        'This page contains no question blocks. Reduce the next block or adjust its working space before printing.',
+        { page: currentPage.number },
+      );
+      currentPage.warnings.push(warning);
+      warnings.push(warning);
+    } else if (currentPage.items.length && currentPage.utilisation < 0.16 && currentPage.number !== pages.length) {
       const warning = blockWarning(
         'page-nearly-empty',
         'This page has a large amount of unused space.',
@@ -541,7 +592,7 @@ function buildPaginationResult(geometry, outputView, pages, placements, warnings
       .filter((warning) => warning.code === 'no-meaningful-response-space')
       .map((warning) => warning.blockId),
     crowdedPageNumbers: finalWarnings.filter((warning) => ['page-near-capacity', 'block-overcrowded'].includes(warning.code)).map((warning) => warning.page).filter(Boolean),
-    sparsePageNumbers: finalWarnings.filter((warning) => warning.code === 'page-nearly-empty').map((warning) => warning.page).filter(Boolean),
+    sparsePageNumbers: finalWarnings.filter((warning) => ['page-empty', 'page-nearly-empty'].includes(warning.code)).map((warning) => warning.page).filter(Boolean),
     orphanedHeadingBlockIds: finalWarnings.filter((warning) => warning.code === 'orphaned-heading').map((warning) => warning.blockId).filter(Boolean),
   };
 }
@@ -605,15 +656,17 @@ function paginateRowsWorksheet(worksheet, options = {}) {
 
   for (let index = 0; index < worksheet.blocks.length; index += 1) {
     const block = worksheet.blocks[index];
+    const pageFootprint = compositionFootprint(block) === 'page';
     const pageHint = Math.max(0, Math.floor(finiteNumber(block.layout?.pageHint, 0)));
     if (manualBreaks.has(block.id) && hasItems()) newPage();
     while (pageHint > page.number) newPage();
     if (pageHint && pageHint < page.number) warnings.push(blockWarning('page-hint-unavailable', 'This block could not move backwards without changing worksheet order.', { blockId: block.id, requestedPage: pageHint, page: page.number }));
+    if (pageFootprint && hasItems()) newPage();
 
     const nextBlock = worksheet.blocks[index + 1];
-    const paired = mayUseHalfWidth(block)
+    const paired = mayUseHalfWidth(block, worksheet)
       && nextBlock
-      && mayUseHalfWidth(nextBlock)
+      && mayUseHalfWidth(nextBlock, worksheet)
       && !manualBreaks.has(nextBlock.id)
       && (nextBlock.section === block.section || !nextBlock.section || !block.section);
 
@@ -622,7 +675,6 @@ function paginateRowsWorksheet(worksheet, options = {}) {
       const rightMeasurement = measureQuestionBlock(nextBlock, geometry.columnWidthMm, { density, outputView });
       const rowHeight = Math.max(leftMeasurement.heightMm, rightMeasurement.heightMm);
       if (rowHeight > remainingHeight() + PAGINATION_DEFAULTS.minimumRemainingMm && hasItems()) newPage();
-      if (rowHeight > remainingHeight() + PAGINATION_DEFAULTS.minimumRemainingMm && page.number === 1 && rowHeight <= geometry.contentHeightMm - page.footerHeightMm) newPage();
       addPlacement(block, index, 0, geometry.columnWidthMm, leftMeasurement, rowHeight);
       addPlacement(nextBlock, index + 1, 1, geometry.columnWidthMm, rightMeasurement, rowHeight);
       cursorY += rowHeight + blockGapMm;
@@ -630,17 +682,17 @@ function paginateRowsWorksheet(worksheet, options = {}) {
       continue;
     }
 
-    const full = needsFullWidth(block) || !mayUseHalfWidth(block);
+    const full = needsFullWidth(block) || !mayUseHalfWidth(block, worksheet);
     const widthMm = full ? geometry.contentWidthMm : geometry.columnWidthMm;
     let measurement = measureQuestionBlock(block, widthMm, { density, outputView });
-    if (block.layout?.keepWithNext && nextBlock) {
-      const nextWidth = mayUseHalfWidth(nextBlock) ? geometry.columnWidthMm : geometry.contentWidthMm;
+    if (!pageFootprint && block.layout?.keepWithNext && nextBlock) {
+      const nextWidth = mayUseHalfWidth(nextBlock, worksheet) ? geometry.columnWidthMm : geometry.contentWidthMm;
       const nextMeasurement = measureQuestionBlock(nextBlock, nextWidth, { density, outputView });
       if (measurement.heightMm + blockGapMm + nextMeasurement.heightMm > remainingHeight() && hasItems()) newPage();
     }
     if (measurement.heightMm > remainingHeight() + PAGINATION_DEFAULTS.minimumRemainingMm && hasItems()) newPage();
-    if (measurement.heightMm > remainingHeight() + PAGINATION_DEFAULTS.minimumRemainingMm && page.number === 1 && measurement.heightMm <= geometry.contentHeightMm - page.footerHeightMm) newPage();
     measurement = measureQuestionBlock(block, widthMm, { density, outputView });
+    measurement = fillPageMeasurement(block, measurement, remainingHeight());
     addPlacement(block, index, full ? null : 0, widthMm, measurement);
     cursorY += measurement.heightMm + blockGapMm;
   }
@@ -657,7 +709,9 @@ export function paginateWorksheet(worksheet, options = {}) {
     throw new TypeError('paginateWorksheet requires a worksheet with an ordered blocks array.');
   }
   const compositionMode = options.compositionMode ?? worksheet.architecture?.compositionMode;
-  if (compositionMode === 'rows' || compositionMode === 'deliberate-pages') {
+  const hasRowsSection = compositionMode === 'flow'
+    && (worksheet.architecture?.sections ?? []).some((section) => section?.layout === 'rows');
+  if (compositionMode === 'rows' || hasRowsSection) {
     return paginateRowsWorksheet(worksheet, options);
   }
   const geometry = getPageGeometry(worksheet, options);
@@ -678,12 +732,14 @@ export function paginateWorksheet(worksheet, options = {}) {
   pages.push(page);
   let columnIndex = 0;
   let cursorY = page.bodyTopMm;
+  let dedicatedPageFilled = false;
 
   function newPage() {
     page = createPage(pages.length + 1, geometry, worksheet, options);
     pages.push(page);
     columnIndex = 0;
     cursorY = page.bodyTopMm;
+    dedicatedPageFilled = false;
   }
 
   function advanceColumnOrPage() {
@@ -708,9 +764,15 @@ export function paginateWorksheet(worksheet, options = {}) {
   }
 
   for (let index = 0; index < worksheet.blocks.length; index += 1) {
+    if (dedicatedPageFilled) newPage();
     const block = worksheet.blocks[index];
+    const footprint = compositionFootprint(block);
+    const pageFootprint = footprint === 'page';
     const wantsFullWidth = geometry.columns === 2 && (
-      block.layout?.columnSpan === 'full' || block.model?.metadata?.requiresFullWidth === true
+      footprint === 'full'
+      || pageFootprint
+      || block.layout?.columnSpan === 'full'
+      || block.model?.metadata?.requiresFullWidth === true
     );
     const pageHint = Math.max(0, Math.floor(finiteNumber(block.layout?.pageHint, 0)));
 
@@ -723,6 +785,7 @@ export function paginateWorksheet(worksheet, options = {}) {
         { blockId: block.id, requestedPage: pageHint, page: page.number },
       ));
     }
+    if (pageFootprint && pageHasItems()) newPage();
 
     if (wantsFullWidth && pageHasItems()) newPage();
     if (wantsFullWidth) {
@@ -734,7 +797,7 @@ export function paginateWorksheet(worksheet, options = {}) {
     let measurement = measureQuestionBlock(block, widthMm, { density, outputView });
 
     // Keep a heading/instruction with its next block where this is possible.
-    if (block.layout?.keepWithNext && worksheet.blocks[index + 1]) {
+    if (!pageFootprint && block.layout?.keepWithNext && worksheet.blocks[index + 1]) {
       const nextMeasurement = measureQuestionBlock(worksheet.blocks[index + 1], widthMm, { density, outputView });
       if (measurement.heightMm + blockGapMm + nextMeasurement.heightMm > remainingHeight() && currentColumnHasItems()) {
         advanceColumnOrPage();
@@ -745,13 +808,11 @@ export function paginateWorksheet(worksheet, options = {}) {
       if (currentColumnHasItems() || pageHasItems() && wantsFullWidth) {
         if (wantsFullWidth) newPage();
         else advanceColumnOrPage();
-      } else if (page.number === 1 && measurement.heightMm <= geometry.contentHeightMm - page.footerHeightMm) {
-        // A large intact block may not fit below the title but can fit safely on page 2.
-        newPage();
       }
       widthMm = wantsFullWidth ? geometry.contentWidthMm : geometry.columnWidthMm;
       measurement = measureQuestionBlock(block, widthMm, { density, outputView });
     }
+    measurement = fillPageMeasurement(block, measurement, remainingHeight());
 
     const availableHeightMm = page.bodyBottomMm - cursorY;
     const overflowMm = Math.max(0, measurement.heightMm - availableHeightMm);
@@ -799,28 +860,13 @@ export function paginateWorksheet(worksheet, options = {}) {
     }
     placements[block.id] = placement;
     cursorY += measurement.heightMm + blockGapMm;
+    if (pageFootprint) dedicatedPageFilled = true;
 
     if (wantsFullWidth) {
       // Further two-column content begins below the spanning item.
       for (const column of page.columns) column.usedHeightMm = cursorY - page.bodyTopMm;
       columnIndex = 0;
     }
-  }
-
-  for (const currentPage of pages) {
-    const used = currentPage.columns.reduce((sum, column) => sum + column.usedHeightMm, 0);
-    const capacity = currentPage.bodyHeightMm * geometry.columns;
-    currentPage.utilisation = capacity > 0 ? Math.min(1, used / capacity) : 1;
-    if (currentPage.utilisation >= PAGINATION_DEFAULTS.overcrowdingThreshold && !currentPage.warnings.some((warning) => warning.code === 'page-near-capacity')) {
-      const warning = blockWarning(
-        'page-near-capacity',
-        'This page is very full; check the final PDF before printing.',
-        { page: currentPage.number },
-      );
-      currentPage.warnings.push(warning);
-      warnings.push(warning);
-    }
-    currentPage.warnings = dedupeWarnings(currentPage.warnings);
   }
 
   return buildPaginationResult(geometry, outputView, pages, placements, warnings);

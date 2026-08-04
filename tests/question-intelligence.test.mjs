@@ -72,6 +72,46 @@ test('rounding analysis calculates accurate boundaries and protects the rounded 
   assert.equal(rankModelRecommendations(interpretation).recommendations[0].family, 'rounding-number-line');
 });
 
+test('numeric rounding magnitudes with thousands separators retain exact boundaries', () => {
+  const interpretation = analyseQuestion('Round 3,450 to the nearest 1,000.');
+
+  assert.deepEqual(interpretation.mathematicalStructure.rounding, {
+    lower: 3000,
+    upper: 4000,
+    midpoint: 3500,
+    magnitude: 1000,
+    target: 3450,
+  });
+  assert.equal(rankModelRecommendations(interpretation).recommendations[0].family, 'rounding-number-line');
+});
+
+test('times tables and transformation wording do not become statistics or money', () => {
+  const timesTable = analyseQuestion('Write the next three numbers in the 4 times table.');
+  const fractionChange = analyseQuestion('Change 3/4 into a decimal.');
+  const measureChange = analyseQuestion('Change 250 cm to metres.');
+
+  assert.equal(timesTable.curriculumDomain, 'Multiplication');
+  assert.notEqual(rankModelRecommendations(timesTable).recommendations[0]?.family, 'tally-frequency-table');
+  assert.notEqual(fractionChange.curriculumDomain, 'Money');
+  assert.notEqual(rankModelRecommendations(fractionChange).recommendations[0]?.family, 'money');
+  assert.notEqual(measureChange.curriculumDomain, 'Money');
+  assert.notEqual(rankModelRecommendations(measureChange).recommendations[0]?.family, 'money');
+});
+
+test('spaced slash division and am/pm durations retain their intended mathematics', () => {
+  const division = analyseQuestion('What is 12 / 3?');
+  const duration = analyseQuestion('How long is it from 11:30 am to 1:00 pm?');
+  const durationMatch = matchQuestionToModels('How long is it from 11:30 am to 1:00 pm?');
+
+  assert.equal(division.curriculumDomain, 'Division');
+  assert.equal(division.questionFamily, 'calculate');
+  assert.deepEqual(division.numericalCharacteristics.fractions, []);
+  assert.equal(duration.mathematicalStructure.measurement.durationMinutes, 90);
+  assert.equal(durationMatch.suggestions[0].family, 'duration-timeline');
+  assert.equal(durationMatch.suggestions[0].recipe.values.startMinutes, 690);
+  assert.equal(durationMatch.suggestions[0].recipe.values.endMinutes, 780);
+});
+
 test('comparison subtraction puts the unknown smaller quantity in the correct bar-model position', () => {
   const interpretation = analyseQuestion('Mia has 846 stickers. Noah has 279 fewer. How many stickers does Noah have?');
   assert.equal(interpretation.curriculumDomain, 'Subtraction');
@@ -84,6 +124,27 @@ test('comparison subtraction puts the unknown smaller quantity in the correct ba
   });
   assert.equal(interpretation.mathematicalStructure.unknownPosition, 'smaller-quantity');
   assert.equal(rankModelRecommendations(interpretation).recommendations[0].family, 'comparison-bar');
+});
+
+test('a fewer-than comparison is independent of which named quantity appears first', () => {
+  const first = analyseQuestion('Amy has 17 fewer stickers than Ben. Ben has 42 stickers. How many stickers does Amy have?');
+  const second = analyseQuestion('Ben has 42 stickers. Amy has 17 fewer stickers than Ben. How many stickers does Amy have?');
+  const expected = {
+    greater: 42,
+    lesser: null,
+    difference: 17,
+    type: 'reduction-or-comparison',
+  };
+
+  assert.deepEqual(first.mathematicalStructure.comparison, expected);
+  assert.deepEqual(second.mathematicalStructure.comparison, expected);
+  for (const source of [first.sourceText, second.sourceText]) {
+    const recipe = matchQuestionToModels(source).suggestions[0]?.recipe;
+    assert.equal(recipe.family, 'comparison-bar');
+    assert.equal(recipe.values.greater, 42);
+    assert.equal(recipe.values.lesser, 25);
+    assert.equal(recipe.values.difference, 17);
+  }
 });
 
 test('a teacher correction changes the structural recommendation without rewriting the question', () => {

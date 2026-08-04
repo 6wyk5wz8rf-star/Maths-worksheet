@@ -247,6 +247,11 @@ export function suggestedWorkingSpace(block, purpose = 'practice') {
   const text = words(block);
   const family = block?.extracted?.interpretation?.questionFamily ?? '';
   const assessment = purpose === 'assessment';
+  // A response model is itself the place where the pupil records the answer
+  // (for example a blank clock, graph or completion diagram). Adding a second
+  // generic box wastes page space and makes the intended response route less
+  // clear.
+  if (block?.model?.purpose === 'response-model') return { type: 'none', size: 'compact', label: '' };
   if (/\b(explain|justify|prove|convince|error analysis|mistake|counterexample)\b/.test(text)) {
     return { type: /\bprove|counterexample\b/.test(text) ? 'prove-it' : 'lined-explanation', size: assessment ? 'standard' : 'generous', lines: assessment ? 4 : 6, label: 'Explain your thinking' };
   }

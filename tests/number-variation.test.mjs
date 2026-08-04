@@ -5,6 +5,7 @@ import {
   additionCarryProfile,
   analyseSupportedVariation,
   createSafeNumberVariation,
+  multiplicationCarryProfile,
   roundingProfile,
   subtractionBorrowProfile,
 } from '../js/number-variation.js';
@@ -43,8 +44,9 @@ test('direct subtraction variation preserves every borrow column and never creat
   );
 });
 
-test('one-digit multiplication keeps a one-digit multiplier and calculates a valid new answer', () => {
+test('one-digit multiplication preserves its complete carry profile', () => {
   const source = 'Calculate 234 × 3.';
+  const analysis = analyseSupportedVariation(source);
   const result = createSafeNumberVariation(source, { seed: 'multiplication' });
 
   assert.equal(result.supported, true);
@@ -53,6 +55,20 @@ test('one-digit multiplication keeps a one-digit multiplier and calculates a val
   assert.ok(result.values.multiplier >= 1 && result.values.multiplier <= 9);
   assert.equal(result.values.left * result.values.right, result.values.result);
   assert.equal(String(result.values.multiplicand).length, 3);
+  assert.equal(
+    multiplicationCarryProfile(result.values.multiplicand, result.values.multiplier).signature,
+    analysis.structure.carryProfile.signature,
+  );
+
+  for (const [question, seed] of [['Calculate 222 × 3.', 4], ['Calculate 999 × 9.', 2]]) {
+    const original = analyseSupportedVariation(question);
+    const varied = createSafeNumberVariation(question, { seed });
+    if (!varied.changed) continue;
+    assert.equal(
+      multiplicationCarryProfile(varied.values.multiplicand, varied.values.multiplier).signature,
+      original.structure.carryProfile.signature,
+    );
+  }
 });
 
 test('one-digit division preserves an intentional remainder exactly and exact division remains exact', () => {

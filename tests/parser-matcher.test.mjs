@@ -139,6 +139,28 @@ test('extracts mathematical quantities without importing structural numbers or m
   assert.ok(!info.numericValues.includes(2) || info.numericValues.filter((value) => value === 2).length === 0);
 });
 
+test('a spaced slash is a division operator while compact and explicit fraction forms remain fractions', () => {
+  const division = extractMathInfo('What is 12 / 3?');
+  const compactFraction = extractMathInfo('Shade 3/4 of the strip.');
+  const explicitSpacedFraction = extractMathInfo('Find the fraction 3 / 4 of 20.');
+
+  assert.deepEqual(division.fractions, []);
+  assert.deepEqual(division.numericValues, [12, 3]);
+  assert.ok(division.operations.includes('division'));
+  assert.deepEqual(compactFraction.fractions.map(({ numerator, denominator }) => [numerator, denominator]), [[3, 4]]);
+  assert.deepEqual(explicitSpacedFraction.fractions.map(({ numerator, denominator }) => [numerator, denominator]), [[3, 4]]);
+});
+
+test('time extraction retains meridiem and normalises it for exact duration arithmetic', () => {
+  const info = extractMathInfo('How long is it from 11:30 am to 1:00 pm?');
+
+  assert.equal(info.times[0].meridiem, 'am');
+  assert.equal(info.times[0].hours, 11);
+  assert.equal(info.times[1].meridiem, 'pm');
+  assert.equal(info.times[1].sourceHours, 1);
+  assert.equal(info.times[1].hours, 13);
+});
+
 test('exports exactly the ten Build 1 family identifiers', () => {
   assert.deepEqual(BUILD1_MODEL_FAMILIES, [
     'place-value', 'base-ten', 'partition', 'number-line', 'part-whole',

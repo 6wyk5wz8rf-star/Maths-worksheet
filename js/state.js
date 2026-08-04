@@ -1,20 +1,19 @@
 import {
   BLOCK_FOOTPRINTS,
-  COMPOSITION_MODES,
   QUESTION_BLOCK_PATTERNS,
   WORKING_SPACE_TYPES,
   normaliseArchitecture,
   normalisePurpose,
   presetSettings,
   purposeToIntent,
-} from './worksheet-architecture.js?v=build3-v4';
+} from './worksheet-architecture.js?v=release-v1';
 import {
   createPresetVariant,
   createVariant,
   deriveVersionOverrides,
   normaliseVersions,
   resolveWorksheetVersion,
-} from './worksheet-versions.js?v=build3-v4';
+} from './worksheet-versions.js?v=release-v1';
 
 /**
  * Maths Page Studio worksheet state.
@@ -46,6 +45,7 @@ const VALID_MODEL_PURPOSES = new Set([
 const VALID_MODEL_SIZES = new Set(['compact', 'standard', 'large']);
 const VALID_MODEL_POSITIONS = new Set(['above', 'beside', 'beneath']);
 const VALID_BUILD2_SCAFFOLD_STATES = new Set(['blank', 'guided', 'modelled']);
+const VALID_STYLE_PRESETS = new Set(['calm', 'clear', 'compact', 'guided', 'assessment', 'homework']);
 const VALID_RESPONSE_TYPES = new Set([
   ...WORKING_SPACE_TYPES,
 ]);
@@ -110,7 +110,10 @@ export function cloneValue(value) {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(cloneValue);
   const output = {};
-  for (const [key, child] of Object.entries(value)) output[key] = cloneValue(child);
+  for (const [key, child] of Object.entries(value)) {
+    if (['__proto__', 'prototype', 'constructor'].includes(key)) continue;
+    output[key] = cloneValue(child);
+  }
   return output;
 }
 
@@ -377,13 +380,24 @@ export function createWorksheet(overrides = {}, options = {}) {
   settings.margins = settings.margins && typeof settings.margins === 'object' && !Array.isArray(settings.margins)
     ? Object.fromEntries(['top', 'right', 'bottom', 'left'].map((edge) => [edge, Math.min(25, Math.max(8, safeNumber(settings.margins[edge], settings.marginMm)))]))
     : null;
-  settings.stylePreset = typeof settings.stylePreset === 'string' ? settings.stylePreset : 'calm';
+  settings.accentColor = /^#[0-9a-f]{6}$/i.test(settings.accentColor) ? settings.accentColor : DEFAULT_GLOBAL_SETTINGS.accentColor;
+  settings.colorMode = ['colour', 'monochrome'].includes(settings.colorMode) ? settings.colorMode : 'colour';
+  settings.density = ['compact', 'standard', 'spacious'].includes(settings.density) ? settings.density : 'standard';
+  settings.typeface = ['system', 'sans', 'rounded'].includes(settings.typeface) ? settings.typeface : 'system';
+  settings.workingSpaceStyle = ['lines', 'grid', 'open'].includes(settings.workingSpaceStyle) ? settings.workingSpaceStyle : 'lines';
+  settings.stylePreset = ['calm', 'clear', 'compact', 'guided', 'assessment', 'homework'].includes(settings.stylePreset) ? settings.stylePreset : 'calm';
   settings.sectionStyle = ['plain', 'line', 'band', 'stage'].includes(settings.sectionStyle) ? settings.sectionStyle : 'line';
   settings.bodyScale = ['small', 'standard', 'large'].includes(settings.bodyScale) ? settings.bodyScale : 'standard';
   settings.lineWeight = ['light', 'standard', 'strong'].includes(settings.lineWeight) ? settings.lineWeight : 'light';
   settings.duplexPlan = ['single-sided', 'double-sided'].includes(settings.duplexPlan) ? settings.duplexPlan : 'single-sided';
-  settings.showMarks = Boolean(settings.showMarks);
-  settings.totalMarks = settings.totalMarks == null ? null : Math.max(0, Math.min(999, safeNumber(settings.totalMarks, null)));
+  settings.showNameField = typeof settings.showNameField === 'boolean' ? settings.showNameField : DEFAULT_GLOBAL_SETTINGS.showNameField;
+  settings.showDateField = typeof settings.showDateField === 'boolean' ? settings.showDateField : DEFAULT_GLOBAL_SETTINGS.showDateField;
+  settings.showClassField = typeof settings.showClassField === 'boolean' ? settings.showClassField : DEFAULT_GLOBAL_SETTINGS.showClassField;
+  settings.questionNumbering = typeof settings.questionNumbering === 'boolean' ? settings.questionNumbering : DEFAULT_GLOBAL_SETTINGS.questionNumbering;
+  settings.pageNumbers = typeof settings.pageNumbers === 'boolean' ? settings.pageNumbers : DEFAULT_GLOBAL_SETTINGS.pageNumbers;
+  settings.showMarks = typeof settings.showMarks === 'boolean' ? settings.showMarks : DEFAULT_GLOBAL_SETTINGS.showMarks;
+  const totalMarks = safeNumber(settings.totalMarks, null);
+  settings.totalMarks = totalMarks == null ? null : Math.max(0, Math.min(999, totalMarks));
 
   const blocks = (Array.isArray(source.blocks) ? source.blocks : source.questionBlocks ?? [])
     .map((block) => normaliseQuestionBlock(block, { idFactory }));
@@ -458,10 +472,25 @@ export function createWorksheet(overrides = {}, options = {}) {
 
 /** Upgrade unknown/legacy persisted data without mutating it. */
 export function migrateWorksheet(input, options = {}) {
-  const source = asObject(input);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('Worksheet data must be an object.');
+  }
+  const source = input;
   const fromVersion = safeNumber(source.version ?? source.schemaVersion, 0);
+  if (Object.hasOwn(source, 'schema') && source.schema !== WORKSHEET_SCHEMA) {
+    throw new Error('This data is not a Maths Page Studio worksheet.');
+  }
   if (fromVersion > WORKSHEET_VERSION) {
     throw new Error(`Worksheet version ${fromVersion} is newer than supported version ${WORKSHEET_VERSION}.`);
+  }
+  if (fromVersion === WORKSHEET_VERSION) {
+    const metadata = source.metadata;
+    if (source.schema !== WORKSHEET_SCHEMA
+      || !metadata || typeof metadata !== 'object' || Array.isArray(metadata)
+      || typeof metadata.id !== 'string' || !metadata.id.trim()
+      || !Array.isArray(source.blocks)) {
+      throw new Error('The saved worksheet is incomplete or malformed.');
+    }
   }
 
   // Version 0 covered early internal shapes (questionBlocks/globalSettings/rawText).
@@ -486,6 +515,17 @@ export function migrateWorksheet(input, options = {}) {
   return migrated;
 }
 
+function tryMigrateWorksheet(input, options = {}) {
+  try {
+    return migrateWorksheet(input, options);
+  } catch {
+    // A newer or malformed local payload must never prevent the application
+    // shell from opening. The stored value is left untouched so a newer build
+    // or a future recovery tool can still read it.
+    return null;
+  }
+}
+
 function replaceBlockAt(blocks, index, replacement) {
   return [...blocks.slice(0, index), ...replacement, ...blocks.slice(index + 1)];
 }
@@ -495,6 +535,42 @@ function mergeResponseRecipes(first, second) {
   const firstRank = sizeRank[first?.size] ?? 1;
   const secondRank = sizeRank[second?.size] ?? 1;
   return cloneValue(firstRank >= secondRank ? first : second);
+}
+
+function mergeTeacherText(first, second) {
+  const values = [first, second]
+    .filter((value) => value != null && String(value).length)
+    .map((value) => String(value));
+  return [...new Set(values)].join('\n');
+}
+
+function mergeTeacherAnswer(first, second) {
+  if (first == null || String(first).length === 0) return cloneValue(second ?? null);
+  if (second == null || String(second).length === 0) return cloneValue(first);
+  if (String(first) === String(second)) return cloneValue(first);
+  return `${first}\n${second}`;
+}
+
+function replaceStructure(state, blocksInput, architectureInput, idFactory) {
+  const blocks = (Array.isArray(blocksInput) ? blocksInput : [])
+    .map((block) => normaliseQuestionBlock(block, { idFactory }));
+  const architecture = normaliseArchitecture(architectureInput ?? state.architecture, blocks);
+  const knownIds = new Set(blocks.map((block) => block.id));
+  const manualBreakBefore = uniqueStrings([
+    ...(state.pageArrangement?.manualBreakBefore ?? []),
+    ...blocks.filter((block) => block.layout?.manualBreakBefore).map((block) => block.id),
+  ]).filter((id) => knownIds.has(id));
+  return {
+    ...state,
+    purpose: architecture.purpose,
+    intent: purposeToIntent(architecture.purpose),
+    architecture,
+    blocks: renumberBlocks(blocks, state.settings.questionNumbering, architecture.numbering),
+    pageArrangement: {
+      ...state.pageArrangement,
+      manualBreakBefore,
+    },
+  };
 }
 
 function refreshSafetyWarnings(worksheet) {
@@ -540,6 +616,7 @@ export const ActionTypes = Object.freeze({
   UPDATE_SETTINGS: 'worksheet/update-settings',
   SET_ORIGINAL_IMPORT: 'worksheet/set-original-import',
   REPLACE_BLOCKS: 'worksheet/replace-blocks',
+  REPLACE_STRUCTURE: 'worksheet/replace-structure',
   ADD_BLOCK: 'worksheet/add-block',
   UPDATE_BLOCK: 'worksheet/update-block',
   SET_MODEL: 'worksheet/set-model',
@@ -574,6 +651,12 @@ export const worksheetActions = Object.freeze({
     originalImport: { ...details, rawText },
   }),
   replaceBlocks: (blocks) => ({ type: ActionTypes.REPLACE_BLOCKS, blocks }),
+  replaceStructure: (blocks, architecture, options = {}) => ({
+    type: ActionTypes.REPLACE_STRUCTURE,
+    blocks,
+    architecture,
+    ...(VALID_STYLE_PRESETS.has(options?.stylePreset) ? { stylePreset: options.stylePreset } : {}),
+  }),
   addBlock: (block, index) => ({ type: ActionTypes.ADD_BLOCK, block, index }),
   updateBlock: (blockId, patch) => ({ type: ActionTypes.UPDATE_BLOCK, blockId, patch }),
   setModel: (blockId, model) => ({ type: ActionTypes.SET_MODEL, blockId, model }),
@@ -656,13 +739,24 @@ export function worksheetReducer(state, action, options = {}) {
       settings.margins = settings.margins && typeof settings.margins === 'object' && !Array.isArray(settings.margins)
         ? Object.fromEntries(['top', 'right', 'bottom', 'left'].map((edge) => [edge, Math.min(25, Math.max(8, safeNumber(settings.margins[edge], settings.marginMm)))]))
         : null;
-      settings.stylePreset = typeof settings.stylePreset === 'string' ? settings.stylePreset : state.settings.stylePreset;
+      settings.accentColor = /^#[0-9a-f]{6}$/i.test(settings.accentColor) ? settings.accentColor : state.settings.accentColor;
+      settings.colorMode = ['colour', 'monochrome'].includes(settings.colorMode) ? settings.colorMode : state.settings.colorMode;
+      settings.density = ['compact', 'standard', 'spacious'].includes(settings.density) ? settings.density : state.settings.density;
+      settings.typeface = ['system', 'sans', 'rounded'].includes(settings.typeface) ? settings.typeface : state.settings.typeface;
+      settings.workingSpaceStyle = ['lines', 'grid', 'open'].includes(settings.workingSpaceStyle) ? settings.workingSpaceStyle : state.settings.workingSpaceStyle;
+      settings.stylePreset = ['calm', 'clear', 'compact', 'guided', 'assessment', 'homework'].includes(settings.stylePreset) ? settings.stylePreset : state.settings.stylePreset;
       settings.sectionStyle = ['plain', 'line', 'band', 'stage'].includes(settings.sectionStyle) ? settings.sectionStyle : 'line';
       settings.bodyScale = ['small', 'standard', 'large'].includes(settings.bodyScale) ? settings.bodyScale : 'standard';
       settings.lineWeight = ['light', 'standard', 'strong'].includes(settings.lineWeight) ? settings.lineWeight : 'light';
       settings.duplexPlan = ['single-sided', 'double-sided'].includes(settings.duplexPlan) ? settings.duplexPlan : 'single-sided';
-      settings.showMarks = Boolean(settings.showMarks);
-      settings.totalMarks = settings.totalMarks == null ? null : Math.max(0, Math.min(999, safeNumber(settings.totalMarks, null)));
+      settings.showNameField = typeof settings.showNameField === 'boolean' ? settings.showNameField : state.settings.showNameField;
+      settings.showDateField = typeof settings.showDateField === 'boolean' ? settings.showDateField : state.settings.showDateField;
+      settings.showClassField = typeof settings.showClassField === 'boolean' ? settings.showClassField : state.settings.showClassField;
+      settings.questionNumbering = typeof settings.questionNumbering === 'boolean' ? settings.questionNumbering : state.settings.questionNumbering;
+      settings.pageNumbers = typeof settings.pageNumbers === 'boolean' ? settings.pageNumbers : state.settings.pageNumbers;
+      settings.showMarks = typeof settings.showMarks === 'boolean' ? settings.showMarks : state.settings.showMarks;
+      const totalMarks = safeNumber(settings.totalMarks, null);
+      settings.totalMarks = totalMarks == null ? null : Math.max(0, Math.min(999, totalMarks));
       let blocks = state.blocks;
       if (settings.questionNumbering !== state.settings.questionNumbering) {
         blocks = renumberBlocks(blocks, Boolean(settings.questionNumbering), state.architecture?.numbering);
@@ -683,10 +777,25 @@ export function worksheetReducer(state, action, options = {}) {
       break;
     }
     case ActionTypes.REPLACE_BLOCKS: {
-      const blocks = (Array.isArray(action.blocks) ? action.blocks : [])
-        .map((block) => normaliseQuestionBlock(block, { idFactory }));
-      const architecture = normaliseArchitecture(state.architecture, blocks);
-      next = { ...state, architecture, blocks: renumberBlocks(blocks, state.settings.questionNumbering, architecture.numbering) };
+      next = replaceStructure(state, action.blocks, state.architecture, idFactory);
+      break;
+    }
+    case ActionTypes.REPLACE_STRUCTURE: {
+      next = replaceStructure(state, action.blocks, action.architecture, idFactory);
+      if (VALID_STYLE_PRESETS.has(action.stylePreset)) {
+        next = {
+          ...next,
+          settings: {
+            ...next.settings,
+            ...presetSettings(action.stylePreset),
+            stylePreset: action.stylePreset,
+          },
+          architecture: {
+            ...next.architecture,
+            stylePreset: action.stylePreset,
+          },
+        };
+      }
       break;
     }
     case ActionTypes.ADD_BLOCK: {
@@ -851,8 +960,11 @@ export function worksheetReducer(state, action, options = {}) {
           }] : []),
         ]),
         teacher: {
-          answer: first.teacher.answer ?? second.teacher.answer,
-          notes: [first.teacher.notes, second.teacher.notes].filter(Boolean).join('\n'),
+          answer: mergeTeacherAnswer(first.teacher.answer, second.teacher.answer),
+          notes: mergeTeacherText(first.teacher.notes, second.teacher.notes),
+          expectedMethod: mergeTeacherText(first.teacher.expectedMethod, second.teacher.expectedMethod),
+          misconception: mergeTeacherText(first.teacher.misconception, second.teacher.misconception),
+          markingNote: mergeTeacherText(first.teacher.markingNote, second.teacher.markingNote),
           completedModel: first.teacher.completedModel ?? second.teacher.completedModel,
         },
       };
@@ -989,7 +1101,7 @@ export function worksheetReducer(state, action, options = {}) {
       next = {
         ...state,
         versions: { activeId, items },
-        outputView: activeId === 'master' ? state.outputView : items.find((item) => item.id === activeId)?.outputView ?? state.outputView,
+        outputView: activeId === 'master' ? 'pupil' : items.find((item) => item.id === activeId)?.outputView ?? state.outputView,
         printSettings: { ...state.printSettings, selectedVersionId: state.printSettings.selectedVersionId === action.versionId ? activeId : state.printSettings.selectedVersionId },
       };
       break;
@@ -1097,23 +1209,26 @@ function updateProjectIndex(storage, worksheet) {
   return writeJson(storage, PROJECT_INDEX_KEY, existing);
 }
 
-export function saveProject(worksheet, storage = getDefaultStorage()) {
+export function saveProject(worksheet, storage = getDefaultStorage(), options = {}) {
   if (!storage) return false;
-  const normalised = migrateWorksheet(worksheet);
+  const normalised = tryMigrateWorksheet(worksheet);
+  if (!normalised) return false;
   const saved = writeJson(storage, projectStorageKey(normalised.metadata.id), normalised);
   if (!saved) return false;
-  updateProjectIndex(storage, normalised);
-  try {
-    storage.setItem(CURRENT_PROJECT_KEY, normalised.metadata.id);
-  } catch {
-    // The project payload is still safely saved; current-project is convenience only.
+  const indexed = updateProjectIndex(storage, normalised);
+  if (options.setCurrent !== false) {
+    try {
+      storage.setItem(CURRENT_PROJECT_KEY, normalised.metadata.id);
+    } catch {
+      // The project payload is still safely saved; current-project is convenience only.
+    }
   }
-  return true;
+  return indexed;
 }
 
 export function loadProject(projectId, storage = getDefaultStorage(), options = {}) {
   const project = readJson(storage, projectStorageKey(projectId), null);
-  return project ? migrateWorksheet(project, options) : null;
+  return project ? tryMigrateWorksheet(project, options) : null;
 }
 
 export function listProjects(storage = getDefaultStorage()) {
@@ -1136,61 +1251,124 @@ export function loadCurrentProject(storage = getDefaultStorage(), options = {}) 
 /** Caller owns destructive-action confirmation. */
 export function deleteProject(projectId, storage = getDefaultStorage()) {
   if (!storage || !projectId) return false;
+  const projectKey = projectStorageKey(projectId);
+  const trackedKeys = [PROJECT_INDEX_KEY, ...LEGACY_PROJECT_INDEX_KEYS, CURRENT_PROJECT_KEY, projectKey];
+  const before = new Map();
   try {
-    storage.removeItem(projectStorageKey(projectId));
+    for (const key of trackedKeys) before.set(key, storage.getItem(key));
     const index = readProjectIndex(storage).filter((entry) => entry.id !== projectId);
-    writeJson(storage, PROJECT_INDEX_KEY, index);
+    if (!writeJson(storage, PROJECT_INDEX_KEY, index)) return false;
     for (const key of LEGACY_PROJECT_INDEX_KEYS) {
       const legacy = readJson(storage, key, []);
-      if (Array.isArray(legacy)) writeJson(storage, key, legacy.filter((entry) => entry?.id !== projectId));
+      if (Array.isArray(legacy) && legacy.some((entry) => entry?.id === projectId)) {
+        if (!writeJson(storage, key, legacy.filter((entry) => entry?.id !== projectId))) throw new Error('Could not update a legacy project index.');
+      }
     }
     if (storage.getItem(CURRENT_PROJECT_KEY) === projectId) storage.removeItem(CURRENT_PROJECT_KEY);
+    storage.removeItem(projectKey);
+    if (storage.getItem(projectKey) != null) throw new Error('Project payload remains after deletion.');
     return true;
   } catch {
+    // Best-effort rollback keeps a partially failed delete recoverable and
+    // discoverable instead of losing the payload while reporting failure.
+    for (const [key, value] of before) {
+      try {
+        if (value == null) storage.removeItem(key);
+        else storage.setItem(key, value);
+      } catch { /* the original failure is still reported to the caller */ }
+    }
     return false;
   }
 }
 
+function remapId(value, idMap) {
+  return typeof value === 'string' ? (idMap.get(value) ?? value) : value;
+}
+
+function remapIdList(values, idMap) {
+  return (Array.isArray(values) ? values : []).map((value) => remapId(value, idMap));
+}
+
+function remapPageArrangementReferences(value, idMap) {
+  const source = cloneValue(asObject(value));
+  const pageOverrides = asObject(source.pageOverrides);
+  return {
+    ...source,
+    manualBreakBefore: remapIdList(source.manualBreakBefore, idMap),
+    pageOverrides: Object.fromEntries(Object.entries(pageOverrides).map(([id, override]) => [remapId(id, idMap), cloneValue(override)])),
+  };
+}
+
+function remapArchitectureReferences(value, idMap) {
+  const source = cloneValue(asObject(value));
+  if (!Array.isArray(source.sections)) return source;
+  return {
+    ...source,
+    sections: source.sections.map((section) => ({
+      ...section,
+      id: remapId(section.id, idMap),
+      headingId: remapId(section.headingId, idMap),
+      ...(Array.isArray(section.blockIds) ? { blockIds: remapIdList(section.blockIds, idMap) } : {}),
+    })),
+  };
+}
+
+function remapBlockReferences(block, idMap, { remapIdentity = true } = {}) {
+  const copy = cloneValue(block);
+  if (remapIdentity) copy.id = remapId(copy.id, idMap);
+  copy.section = remapId(copy.section, idMap);
+  if (copy.source && typeof copy.source === 'object') {
+    copy.source.sharedInstructionId = remapId(copy.source.sharedInstructionId, idMap);
+  }
+  return copy;
+}
+
+function remapBlockPatchReferences(patch, idMap) {
+  const copy = cloneValue(patch);
+  if (!copy || typeof copy !== 'object' || Array.isArray(copy)) return copy;
+  if (Object.hasOwn(copy, 'id')) copy.id = remapId(copy.id, idMap);
+  if (Object.hasOwn(copy, 'section')) copy.section = remapId(copy.section, idMap);
+  if (copy.source && typeof copy.source === 'object') {
+    copy.source.sharedInstructionId = remapId(copy.source.sharedInstructionId, idMap);
+  }
+  return copy;
+}
+
 export function duplicateProject(sourceOrId, options = {}, storage = getDefaultStorage()) {
-  const source = typeof sourceOrId === 'string' ? loadProject(sourceOrId, storage, options) : sourceOrId;
+  const loaded = typeof sourceOrId === 'string' ? loadProject(sourceOrId, storage, options) : sourceOrId;
+  const source = loaded ? tryMigrateWorksheet(loaded, options) : null;
   if (!source) return null;
   const idFactory = options.idFactory ?? createId;
   const now = options.now?.() ?? defaultNow();
-  const duplicate = migrateWorksheet(cloneValue(source), options);
+  const duplicate = tryMigrateWorksheet(cloneValue(source), options);
+  if (!duplicate) return null;
   duplicate.metadata.id = idFactory('worksheet');
   duplicate.metadata.name = options.name ?? `${source.metadata.name || source.metadata.title} copy`;
   duplicate.metadata.createdAt = now;
   duplicate.metadata.updatedAt = now;
   duplicate.revision = 0;
-  duplicate.pageArrangement = cloneValue(source.pageArrangement);
-  duplicate.blocks = source.blocks.map((block) => ({ ...cloneValue(block), id: idFactory('question') }));
-  const idMap = new Map(source.blocks.map((block, index) => [block.id, duplicate.blocks[index].id]));
-  duplicate.blocks = duplicate.blocks.map((block) => ({
-    ...block,
-    section: idMap.get(block.section) ?? block.section,
-  }));
-  duplicate.pageArrangement.manualBreakBefore = source.pageArrangement.manualBreakBefore
-    .map((id) => idMap.get(id))
-    .filter(Boolean);
-  duplicate.architecture = {
-    ...cloneValue(source.architecture),
-    sections: (source.architecture?.sections ?? []).map((section) => ({
-      ...cloneValue(section),
-      id: idMap.get(section.id) ?? section.id,
-      headingId: idMap.get(section.headingId) ?? section.headingId,
-    })),
-  };
-  const versionIdMap = new Map();
   const sourceVersions = normaliseVersions(source.versions, source, { idFactory });
+  const idMap = new Map(source.blocks.map((block) => [block.id, idFactory('question')]));
+  for (const version of sourceVersions.items) {
+    for (const block of version.overrides?.addedBlocks ?? []) {
+      if (typeof block?.id === 'string' && !idMap.has(block.id)) idMap.set(block.id, idFactory('question'));
+    }
+  }
+  duplicate.blocks = source.blocks.map((block) => remapBlockReferences(block, idMap));
+  duplicate.pageArrangement = remapPageArrangementReferences(source.pageArrangement, idMap);
+  duplicate.architecture = remapArchitectureReferences(source.architecture, idMap);
+  const versionIdMap = new Map();
   const copiedVersions = sourceVersions.items.map((version) => {
     if (version.id === 'master') return version;
     const nextId = idFactory('version');
     versionIdMap.set(version.id, nextId);
     const overrides = cloneValue(version.overrides);
-    overrides.blockPatches = Object.fromEntries(Object.entries(overrides.blockPatches ?? {}).map(([id, patch]) => [idMap.get(id) ?? id, patch]));
-    overrides.hiddenBlockIds = (overrides.hiddenBlockIds ?? []).map((id) => idMap.get(id) ?? id);
-    overrides.addedBlocks = (overrides.addedBlocks ?? []).map((block) => ({ ...block, id: idMap.get(block.id) ?? block.id, section: idMap.get(block.section) ?? block.section }));
-    overrides.order = Array.isArray(overrides.order) ? overrides.order.map((id) => idMap.get(id) ?? id) : null;
+    overrides.blockPatches = Object.fromEntries(Object.entries(overrides.blockPatches ?? {}).map(([id, patch]) => [remapId(id, idMap), remapBlockPatchReferences(patch, idMap)]));
+    overrides.hiddenBlockIds = remapIdList(overrides.hiddenBlockIds, idMap);
+    overrides.addedBlocks = (overrides.addedBlocks ?? []).map((block) => remapBlockReferences(block, idMap));
+    overrides.order = Array.isArray(overrides.order) ? remapIdList(overrides.order, idMap) : null;
+    overrides.pageArrangement = remapPageArrangementReferences(overrides.pageArrangement, idMap);
+    overrides.architecture = remapArchitectureReferences(overrides.architecture, idMap);
     return { ...version, id: nextId, overrides };
   });
   const activeVersionId = sourceVersions.activeId === 'master' ? 'master' : versionIdMap.get(sourceVersions.activeId) ?? 'master';
@@ -1202,8 +1380,7 @@ export function duplicateProject(sourceOrId, options = {}, storage = getDefaultS
       : versionIdMap.get(source.printSettings?.selectedVersionId) ?? activeVersionId,
   };
   duplicate.blocks = renumberBlocks(duplicate.blocks, duplicate.settings.questionNumbering, duplicate.architecture.numbering);
-  saveProject(duplicate, storage);
-  return duplicate;
+  return saveProject(duplicate, storage, { setCurrent: false }) ? duplicate : null;
 }
 
 export function createNamedProject(options = {}, storage = getDefaultStorage()) {
@@ -1223,29 +1400,63 @@ export function createStore(initialWorksheet, options = {}) {
   const storage = options.storage === undefined ? getDefaultStorage() : options.storage;
   const autosave = options.autosave !== false;
   const autosaveDelay = Math.max(0, Number(options.autosaveDelay) || 0);
-  let state = initialWorksheet
-    ? migrateWorksheet(initialWorksheet, { now, idFactory })
-    : createWorksheet({}, { now, idFactory });
+  const migratedInitial = initialWorksheet
+    ? tryMigrateWorksheet(initialWorksheet, { now, idFactory })
+    : null;
+  const initialRecoveryFailed = Boolean(initialWorksheet && !migratedInitial);
+  let state = migratedInitial ?? createWorksheet({}, { now, idFactory });
   let past = [];
   let future = [];
   const listeners = new Set();
   let saveTimer = null;
+  let persistenceStatus = !autosave || !storage
+    ? 'unavailable'
+    : initialRecoveryFailed ? 'error' : 'saved';
 
-  function notify(reason, action = null) {
-    for (const listener of [...listeners]) listener(state, { reason, action, canUndo: past.length > 0, canRedo: future.length > 0 });
+  function notify(reason, action = null, details = {}) {
+    for (const listener of [...listeners]) listener(state, {
+      reason,
+      action,
+      canUndo: past.length > 0,
+      canRedo: future.length > 0,
+      persistenceStatus,
+      persistenceOnly: false,
+      ...details,
+    });
+  }
+
+  function setPersistenceStatus(status) {
+    if (status === persistenceStatus) return;
+    persistenceStatus = status;
+    notify('persistence', null, { persistenceOnly: true });
+  }
+
+  function completeSave() {
+    let saved = false;
+    try {
+      saved = saveProject(state, storage);
+    } catch {
+      saved = false;
+    }
+    setPersistenceStatus(saved ? 'saved' : 'error');
+    return saved;
   }
 
   function scheduleSave() {
-    if (!autosave || !storage) return;
+    if (!autosave || !storage) {
+      setPersistenceStatus('unavailable');
+      return false;
+    }
+    setPersistenceStatus('saving');
     if (autosaveDelay === 0) {
-      saveProject(state, storage);
-      return;
+      return completeSave();
     }
     if (saveTimer != null) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      saveProject(state, storage);
+      completeSave();
     }, autosaveDelay);
+    return true;
   }
 
   function commit(next, reason, action = null, recordHistory = true) {
@@ -1256,8 +1467,8 @@ export function createStore(initialWorksheet, options = {}) {
       future = [];
     }
     state = next;
-    scheduleSave();
     notify(reason, action);
+    scheduleSave();
     return true;
   }
 
@@ -1285,6 +1496,7 @@ export function createStore(initialWorksheet, options = {}) {
     },
     canUndo: () => past.length > 0,
     canRedo: () => future.length > 0,
+    getPersistenceStatus: () => persistenceStatus,
     subscribe(listener) {
       if (typeof listener !== 'function') throw new TypeError('subscribe requires a function.');
       listeners.add(listener);
@@ -1295,10 +1507,16 @@ export function createStore(initialWorksheet, options = {}) {
         clearTimeout(saveTimer);
         saveTimer = null;
       }
-      return autosave && storage ? saveProject(state, storage) : false;
+      if (!autosave || !storage) {
+        setPersistenceStatus('unavailable');
+        return false;
+      }
+      setPersistenceStatus('saving');
+      return completeSave();
     },
     replace(nextWorksheet, { clearHistory = true } = {}) {
-      const next = migrateWorksheet(nextWorksheet, { now, idFactory });
+      const next = tryMigrateWorksheet(nextWorksheet, { now, idFactory });
+      if (!next) return false;
       if (clearHistory) {
         past = [];
         future = [];

@@ -1,6 +1,6 @@
 # Maths Page Studio
 
-Maths Page Studio turns copied mathematical questions into accurate, editable and printable A4 pupil worksheets. Build 3 deepens the same complete journey: **Paste → Check → Compose → Print**, adding guided page architecture, controlled question blocks, pupil working space, linked differentiation versions and a strengthened print check.
+Maths Page Studio turns copied mathematical questions into accurate, editable and printable A4 worksheets. The release product keeps one calm journey—**Paste → Check → Compose → Print**—with guided page architecture, purposeful pupil working space, linked differentiation versions and a print check that protects pupil and teacher output.
 
 ## Run locally
 
@@ -20,7 +20,7 @@ The application is served from the repository root. Keep production asset paths 
 npm test
 ```
 
-The test suite covers parsing, question interpretation and recommendation rules, model integrity, constrained value variation, Build 3 architecture and versions, state history, persistence structures, A4 pagination and GitHub Pages/offline-shell checks.
+The test suite covers parsing, question interpretation and recommendation rules, model integrity, constrained value variation, worksheet architecture and versions, state history, persistence failures and migration, A4 pagination, accessibility contracts and GitHub Pages/offline-shell checks.
 
 Run the test suite before publishing. The deployment test verifies that every statically imported local module is pre-cached and that the HTML, manifest and worker retain project-relative paths.
 
@@ -39,17 +39,17 @@ Run the test suite before publishing. The deployment test verifies that every st
 - `js/number-variation.js` — constraint-safe variations for supported question families
 - `js/pagination.js` — fixed A4 geometry, whole-block pagination and controlled compact rows
 - `service-worker.js` — offline application shell
-- `tests/` — deterministic Build 1 and Build 2 verification sets
+- `tests/` — deterministic mathematical, workflow, persistence, layout and release verification
 
 ## GitHub Pages and offline releases
 
 Everything uses relative URLs and standard browser APIs. Publish the repository root from the `main` branch with GitHub Pages; no build step or server is required.
 
-The deployed project path is:
+The deployed product is:
 
 `https://6wyk5wz8rf-star.github.io/Maths-worksheet/`
 
-Use the trailing slash: GitHub Pages redirects the slashless path to it. The service worker pre-caches the application shell and uses a Build 3 cache namespace, so a new online visit refreshes the installed offline shell after deployment. Bump that namespace whenever a release changes the shell or adds a local module.
+Use the trailing slash: GitHub Pages redirects the slashless path to it. The service worker pre-caches the application shell with a product-scoped release namespace, so an update cannot remove caches belonging to another project on the same GitHub Pages origin. Bump the release token and cache namespace together whenever the shell or local module graph changes.
 
 ## Privacy
 

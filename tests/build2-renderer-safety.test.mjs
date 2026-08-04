@@ -69,6 +69,122 @@ test('a fraction set does not silently omit collection objects beyond its printa
   assert.equal(validation.valid, false);
 });
 
+test('grouping division rejects a quotient that would silently omit complete groups', () => {
+  const recipe = createBuild2ModelRecipe('grouping-division', {
+    values: { total: 100, groupSize: 2, showRemainder: true },
+  });
+  const validation = validateBuild2ModelRecipe(recipe);
+  const html = renderBuild2Model(recipe, { outputView: 'pupil' });
+
+  assert.equal(validation.valid, false);
+  assert.match(html, /Model needs review/);
+  assert.doesNotMatch(html, /leftover 76/);
+});
+
+test('division number lines use exact divisor jumps and a truthful remainder endpoint', () => {
+  const html = render('division-number-line', {
+    values: { total: 29, divisor: 4, direction: 'backward' },
+  });
+
+  for (const value of [0, 4, 8, 12, 16, 20, 24, 28, 29]) {
+    assert.match(html, new RegExp(`>${value}<`));
+  }
+  assert.match(html, /remainder 1/);
+  assert.match(html, /7 exact jumps of 4 from 0 to 28, then a remainder of 1 ending at 29/);
+  assert.doesNotMatch(html, /4\.142857|8\.285714|12\.428571/);
+});
+
+test('answer output reveals fields in a completed Build 2 model just like teacher output', () => {
+  const recipe = createBuild2ModelRecipe('duration-timeline', {
+    values: { startMinutes: 690, endMinutes: 780, showJumps: true },
+    unknown: 'duration',
+    hidden: ['duration'],
+    scaffoldState: 'modelled',
+    completionState: 'completed',
+  });
+  const pupil = renderBuild2Model(recipe, { outputView: 'pupil' });
+  const teacher = renderBuild2Model(recipe, { outputView: 'teacher' });
+  const answer = renderBuild2Model(recipe, { outputView: 'answer' });
+
+  assert.match(pupil, /duration: \?/);
+  assert.match(teacher, /90 minutes/);
+  assert.match(answer, /90 minutes/);
+  assert.doesNotMatch(answer, /duration: \?/);
+});
+
+test('sharing division rejects a share too large to draw truthfully', () => {
+  const recipe = createBuild2ModelRecipe('sharing-division', {
+    values: { total: 100, groups: 2, showRemainder: true },
+  });
+  const validation = validateBuild2ModelRecipe(recipe);
+  const html = renderBuild2Model(recipe, { outputView: 'pupil' });
+
+  assert.equal(validation.valid, false);
+  assert.match(html, /Model needs review/);
+  assert.doesNotMatch(html, /mps-build2-model__svg/);
+});
+
+test('renderer capacity limits reject recipes instead of changing or omitting mathematics', () => {
+  const unsafe = [
+    createBuild2ModelRecipe('multiplication-bar', {
+      values: { groups: 17, groupSize: 2, total: 34 },
+    }),
+    createBuild2ModelRecipe('area-square-grid', {
+      values: { rows: 25, columns: 25, showAreaLabel: true },
+    }),
+    createBuild2ModelRecipe('bar-chart', {
+      values: { rows: Array.from({ length: 9 }, (_, index) => ({ label: `Category ${index + 1}`, value: index + 1 })), max: 10 },
+    }),
+    createBuild2ModelRecipe('editable-table', {
+      values: { headers: ['Item', 'Value'], rows: Array.from({ length: 9 }, (_, index) => ({ label: `Row ${index + 1}`, value: index + 1 })) },
+    }),
+    createBuild2ModelRecipe('pictogram', {
+      values: { rows: Array.from({ length: 7 }, (_, index) => ({ label: `Row ${index + 1}`, value: 2 })), key: 2, symbol: '●' },
+    }),
+    createBuild2ModelRecipe('line-graph', {
+      values: { rows: Array.from({ length: 11 }, (_, index) => ({ label: String(index), value: index })), yMax: 10 },
+    }),
+    createBuild2ModelRecipe('equivalent-fraction-strips', {
+      values: { fractions: [{ numerator: 1, denominator: 2 }, { numerator: 2, denominator: 4 }, { numerator: 3, denominator: 6 }, { numerator: 4, denominator: 8 }, { numerator: 5, denominator: 10 }] },
+    }),
+    createBuild2ModelRecipe('expanded-column-addition', {
+      values: { operands: [1, 2, 3, 4, 5], result: null, operation: 'addition' },
+    }),
+    createBuild2ModelRecipe('partition-tree', {
+      values: { whole: 7, parts: [1, 1, 1, 1, 1, 1, 1] },
+    }),
+    createBuild2ModelRecipe('ordering-comparison-line', {
+      values: { numbers: [1, 2, 3, 4, 5, 6], order: 'given' },
+    }),
+    createBuild2ModelRecipe('money-representation', {
+      values: { amountPence: 2000, pricePence: null, tenderedPence: null },
+    }),
+  ];
+
+  for (const recipe of unsafe) {
+    const validation = validateBuild2ModelRecipe(recipe);
+    const html = renderBuild2Model(recipe, { outputView: 'teacher' });
+    assert.equal(validation.valid, false, `${recipe.family} must reject an over-cap recipe`);
+    assert.match(html, /Model needs review/, `${recipe.family} must not draw truncated data`);
+    assert.doesNotMatch(html, /mps-build2-model__svg/);
+  }
+});
+
+test('partial short-division answers must agree with the exact quotient and remainder', () => {
+  for (const values of [
+    { dividend: 10, divisor: 3, quotient: null, remainder: 5 },
+    { dividend: 10, divisor: 3, quotient: 99, remainder: null },
+  ]) {
+    const recipe = createBuild2ModelRecipe('short-division', { values });
+    assert.equal(validateBuild2ModelRecipe(recipe).valid, false);
+    assert.match(renderBuild2Model(recipe, { outputView: 'teacher' }), /Model needs review/);
+  }
+
+  assert.equal(validateBuild2ModelRecipe(createBuild2ModelRecipe('short-division', {
+    values: { dividend: 10, divisor: 3, quotient: null, remainder: 1 },
+  })).valid, true);
+});
+
 test('fraction walls reject unreadable or structurally impossible rows', () => {
   const unreadable = validateBuild2ModelRecipe(createBuild2ModelRecipe('fraction-wall', {
     values: { denominators: [2, 20], highlight: '1/2' },

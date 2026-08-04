@@ -7,6 +7,11 @@
  */
 
 import {
+  BUILD2_GRID_VISUAL_LIMIT,
+  BUILD2_ROW_VISUAL_LIMITS,
+  DIVISION_GROUP_VISUAL_LIMITS,
+  MULTIPLICATION_BAR_VISUAL_LIMIT,
+  SCALING_BAR_VISUAL_LIMIT,
   getBuild2ModelDefinition,
   validateBuild2ModelRecipe,
   describeBuild2Model,
@@ -59,7 +64,7 @@ function modelId(recipe, options = {}) {
 }
 
 function hidden(recipe, key, options = {}) {
-  if (options.outputView === 'teacher') return false;
+  if (options.outputView === 'teacher' || options.outputView === 'answer') return false;
   if (recipe.scaffoldState === 'blank') return true;
   const keys = new Set([...(Array.isArray(recipe.hidden) ? recipe.hidden : []), recipe.unknown].filter(Boolean).map(String));
   if (keys.has(key) || keys.has('all')) return true;
@@ -96,7 +101,7 @@ function svgText(x, y, value, options = {}) {
 }
 
 function svgFrame(recipe, definition, content, options = {}, viewBox = `0 0 ${WIDTH} ${HEIGHT}`) {
-  const description = escapeMarkup(describeBuild2Model(recipe));
+  const description = escapeMarkup(options.accessibleDescription ?? describeBuild2Model(recipe));
   const id = modelId(recipe, options);
   return `<figure class="mps-build2-model mps-build2-model--${escapeMarkup(recipe.family)}" data-build2-model="${escapeMarkup(recipe.family)}">
     <svg class="mps-build2-model__svg" viewBox="${viewBox}" role="img" aria-label="${description}" xmlns="http://www.w3.org/2000/svg">
@@ -139,6 +144,9 @@ function renderNumberLine(recipe, definition, options) {
   let start = n(v.start, 0);
   let end = n(v.end, 10);
   let divisions = Math.max(1, integer(v.divisions, 10));
+  let divisionJumpSize = null;
+  let divisionFullJumps = null;
+  let divisionRemainder = null;
   if (recipe.family === 'fraction-number-line') {
     const denominator = Math.max(1, integer(v.denominator, 1));
     divisions = denominator * Math.max(1, integer(v.maxWhole, 1));
@@ -149,7 +157,12 @@ function renderNumberLine(recipe, definition, options) {
     start = n(v.start, 0); divisions = Math.max(1, integer(v.jumpCount, 1)); end = start + n(v.jumpSize, 1) * divisions;
   }
   if (recipe.family === 'division-number-line') {
-    start = 0; end = Math.max(1, n(v.total, 1)); divisions = Math.max(1, Math.floor(end / Math.max(1, n(v.divisor, 1))));
+    start = 0;
+    end = Math.max(1, integer(v.total, 1));
+    divisionJumpSize = Math.max(1, integer(v.divisor, 1));
+    divisionFullJumps = Math.floor(end / divisionJumpSize);
+    divisionRemainder = end - (divisionFullJumps * divisionJumpSize);
+    divisions = Math.max(1, divisionFullJumps + (divisionRemainder > 0 ? 1 : 0));
   }
   const left = 64; const right = 586; const y = recipe.family === 'negative-number-line' && v.orientation === 'vertical' ? 28 : 124;
   if (recipe.family === 'negative-number-line' && v.orientation === 'vertical') {
@@ -163,13 +176,24 @@ function renderNumberLine(recipe, definition, options) {
     });
     return svgFrame(recipe, definition, content.join(''), options);
   }
-  const values = Array.from({ length: divisions + 1 }, (_, index) => start + ((end - start) * index / divisions));
+  const values = recipe.family === 'division-number-line'
+    ? [
+      ...Array.from({ length: divisionFullJumps + 1 }, (_, index) => index * divisionJumpSize),
+      ...(divisionRemainder > 0 ? [end] : []),
+    ]
+    : Array.from({ length: divisions + 1 }, (_, index) => start + ((end - start) * index / divisions));
   const content = [`<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="${ink}" stroke-width="3"/><path d="M${right} ${y}l-10 -6v12z" fill="${ink}"/>`];
   values.forEach((value, index) => {
-    const x = left + (right - left) * index / divisions;
+    const x = left + ((value - start) / (end - start)) * (right - left);
     content.push(`<line x1="${x}" y1="${y - 9}" x2="${x}" y2="${y + 9}" stroke="${ink}" stroke-width="2"/>`);
-    if (index % labelEvery(divisions) === 0) content.push(svgText(x, y + 30, shown(recipe, `label:${index}`, value, options), { size: 12 }));
+    if (index === 0 || index === values.length - 1 || index % labelEvery(divisions) === 0) content.push(svgText(x, y + 30, shown(recipe, `label:${index}`, value, options), { size: 12 }));
   });
+  if (recipe.family === 'division-number-line' && divisionRemainder > 0) {
+    const remainderStart = end - divisionRemainder;
+    const fromX = left + ((remainderStart - start) / (end - start)) * (right - left);
+    const toX = right;
+    content.push(svgText((fromX + toX) / 2, y - 24, hidden(recipe, 'remainder', options) ? 'remainder ?' : `remainder ${divisionRemainder}`, { size: 12, fill: muted, weight: 700 }));
+  }
   const target = recipe.family === 'rounding-number-line' ? n(v.number, null)
     : recipe.family === 'fraction-number-line' ? n(v.target, null) / Math.max(1, integer(v.denominator, 1))
       : n(v.target, null);
@@ -187,7 +211,15 @@ function renderNumberLine(recipe, definition, options) {
       content.push(`<line x1="${mx}" y1="${y - 14}" x2="${mx}" y2="${y + 14}" stroke="#856153" stroke-width="2" stroke-dasharray="4 3"/>${svgText(mx, y - 25, fmt(mid), { size: 12, fill: '#856153' })}`);
     }
   }
-  return svgFrame(recipe, definition, content.join(''), options);
+  const frameOptions = recipe.family === 'division-number-line'
+    ? {
+      ...options,
+      accessibleDescription: divisionRemainder > 0
+        ? `Division number line with ${divisionFullJumps} exact jumps of ${divisionJumpSize} from 0 to ${end - divisionRemainder}, then a remainder of ${divisionRemainder} ending at ${end}.`
+        : `Division number line with ${divisionFullJumps} exact jumps of ${divisionJumpSize} from 0 to ${end}.`,
+    }
+    : options;
+  return svgFrame(recipe, definition, content.join(''), frameOptions);
 }
 
 function decimalColumns(value) {
@@ -354,12 +386,12 @@ function renderBar(recipe, definition, options) {
     content.push(`<rect x="${left}" y="${baseY}" width="${startW}" height="38" fill="${lavender}" stroke="${ink}"/><rect x="${left + startW}" y="${baseY}" width="${changeW}" height="38" fill="${change >= 0 ? green : peach}" stroke="${ink}"/>${svgText(left + startW / 2, baseY + 25, shown(recipe, 'start', start, options), { size: 17, weight: 700 })}${svgText(left + startW + changeW / 2, baseY + 25, shown(recipe, 'change', Math.abs(change), options), { size: 17, weight: 700 })}${svgText(left + (startW + changeW) / 2, baseY + 72, hidden(recipe, 'result', options) ? 'result: ?' : `result: ${fmt(result)}`, { size: 15, weight: 700 })}`);
   } else if (recipe.family === 'scaling-bar') {
     const original = n(v.original, 1); const multiplier = Math.max(1, n(v.multiplier, 1)); const scaled = n(v.scaled, original * multiplier);
-    const sections = Math.min(12, Math.max(1, Math.round(multiplier))); const w = width / sections;
+    const sections = Math.min(SCALING_BAR_VISUAL_LIMIT, Math.max(1, Math.round(multiplier))); const w = width / sections;
     content.push(`<rect x="${left}" y="68" width="${w}" height="31" fill="${lavender}" stroke="${ink}"/>${svgText(left - 8, 89, shown(recipe, 'original-value', original, options), { anchor: 'end', size: 14 })}`);
     for (let i = 0; i < sections; i += 1) content.push(`<rect x="${left + i * w}" y="132" width="${w}" height="31" fill="${i % 2 ? green : peach}" stroke="${ink}"/>`);
     content.push(svgText(left - 8, 154, hidden(recipe, 'scaled-value', options) ? '?' : fmt(scaled), { anchor: 'end', size: 14 }), svgText(left + width / 2, 194, hidden(recipe, 'multiplier', options) ? 'times as many: ?' : `${fmt(multiplier)} times as many`, { size: 14, weight: 700 }));
   } else if (recipe.family === 'multiplication-bar') {
-    const groups = Math.min(16, Math.max(1, integer(v.groups, 1))); const groupSize = n(v.groupSize, 1); const w = width / groups;
+    const groups = Math.min(MULTIPLICATION_BAR_VISUAL_LIMIT, Math.max(1, integer(v.groups, 1))); const groupSize = n(v.groupSize, 1); const w = width / groups;
     for (let i = 0; i < groups; i += 1) content.push(`<rect x="${left + i * w}" y="88" width="${w}" height="44" fill="${i % 2 ? lavender : green}" stroke="${ink}"/>${svgText(left + i * w + w / 2, 116, shown(recipe, 'group-size', groupSize, options), { size: 15, weight: 700 })}`);
     content.push(svgText(left + width / 2, 164, hidden(recipe, 'groups', options) ? '? equal groups' : `${groups} equal groups`, { size: 14 }), svgText(left + width / 2, 195, hidden(recipe, 'total', options) ? 'total: ?' : `total: ${fmt(n(v.total, groups * groupSize))}`, { size: 16, weight: 700 }));
   } else {
@@ -386,7 +418,7 @@ function renderEquationStrip(recipe, definition, options) {
 }
 
 function renderGrid(recipe, definition, options) {
-  const v = recipe.values; const rows = Math.min(20, Math.max(1, integer(v.rows ?? v.height, 4))); const cols = Math.min(20, Math.max(1, integer(v.columns ?? v.width, 4)));
+  const v = recipe.values; const rows = Math.min(BUILD2_GRID_VISUAL_LIMIT, Math.max(1, integer(v.rows ?? v.height, 4))); const cols = Math.min(BUILD2_GRID_VISUAL_LIMIT, Math.max(1, integer(v.columns ?? v.width, 4)));
   const maxSize = 148; const cell = Math.min(maxSize / rows, maxSize / cols); const x0 = 320 - cols * cell / 2; const y0 = 48;
   const content = [svgText(WIDTH / 2, 27, definition.name, { size: 16, weight: 700 })];
   for (let r = 0; r < rows; r += 1) for (let c = 0; c < cols; c += 1) {
@@ -433,12 +465,15 @@ function renderFactorPairs(recipe, definition, options) {
 function renderGroups(recipe, definition, options) {
   const v = recipe.values; const total = Math.max(0, integer(v.total, 0));
   const sharing = recipe.family === 'sharing-division'; const size = Math.max(1, integer(sharing ? Math.ceil(total / Math.max(1, integer(v.groups, 1))) : v.groupSize, 1));
-  const groupCount = Math.min(12, Math.max(1, sharing ? integer(v.groups, 1) : Math.floor(total / size)));
+  // Validation guarantees these values fit the complete visual. The bounded
+  // fallbacks are retained only as defence in depth; they share the exact
+  // same limits rather than inventing a second, renderer-only capacity.
+  const groupCount = Math.min(DIVISION_GROUP_VISUAL_LIMITS.maxGroups, Math.max(sharing ? 1 : 0, sharing ? integer(v.groups, 1) : Math.floor(total / size)));
   const remainder = total - (sharing ? Math.floor(total / groupCount) * groupCount : groupCount * size);
   const hideQuotient = sharing ? hidden(recipe, 'group-size', options) : hidden(recipe, 'group-count', options);
   const content = [svgText(WIDTH / 2, 27, definition.name, { size: 16, weight: 700 })];
   for (let g = 0; g < groupCount; g += 1) {
-    const x = 54 + (g % 4) * 142; const y = 54 + Math.floor(g / 4) * 70; const dots = hideQuotient ? 0 : Math.min(16, Math.max(0, sharing ? Math.floor(total / groupCount) : size));
+    const x = 54 + (g % 4) * 142; const y = 54 + Math.floor(g / 4) * 70; const dots = hideQuotient ? 0 : Math.min(DIVISION_GROUP_VISUAL_LIMITS.maxItemsPerGroup, Math.max(0, sharing ? Math.floor(total / groupCount) : size));
     content.push(`<rect x="${x}" y="${y}" width="116" height="50" rx="8" fill="${g % 2 ? pale : green}" stroke="${line}"/>`);
     for (let i = 0; i < dots; i += 1) content.push(`<circle cx="${x + 15 + (i % 8) * 13}" cy="${y + 18 + Math.floor(i / 8) * 17}" r="4" fill="${ink}"/>`);
     if (hideQuotient) content.push(svgText(x + 58, y + 31, '?', { size: 21, weight: 700 }));
@@ -823,14 +858,14 @@ function tally(value) { const number = Math.max(0, integer(value, 0)); let out='
 function renderTable(recipe, definition, options) {
   const v=recipe.values; const headers=Array.isArray(v.headers)?v.headers:['Category','Tally','Frequency']; const rows=Array.isArray(v.rows)?v.rows:Array.from({length:Math.max(1,integer(v.rows,4))},(_,i)=>({label:`Row ${i+1}`,value:''})); const x=70; const width=500; const colW=width/headers.length; const rowH=Math.min(29,150/(rows.length+1)); const content=[];
   headers.forEach((head,index)=>content.push(`<rect x="${x+index*colW}" y="48" width="${colW}" height="${rowH}" fill="${lavender}" stroke="${ink}"/>${svgText(x+index*colW+colW/2,48+rowH*.66,head,{size:13,weight:700})}`));
-  rows.slice(0,8).forEach((row,r)=>headers.forEach((head,c)=>{let value=c===0?row.label:c===1&&recipe.family==='tally-frequency-table'?tally(row.value):row.value; if(hidden(recipe,`${c===0?'category':c===1?'tally':'frequency'}:${r}`,options))value='';const y=48+(r+1)*rowH;content.push(`<rect x="${x+c*colW}" y="${y}" width="${colW}" height="${rowH}" fill="#fff" stroke="${line}"/>${svgText(x+c*colW+colW/2,y+rowH*.66,value,{size:13})}`)}));
+  rows.slice(0, BUILD2_ROW_VISUAL_LIMITS[recipe.family] ?? 8).forEach((row,r)=>headers.forEach((head,c)=>{let value=c===0?row.label:c===1&&recipe.family==='tally-frequency-table'?tally(row.value):row.value; if(hidden(recipe,`${c===0?'category':c===1?'tally':'frequency'}:${r}`,options))value='';const y=48+(r+1)*rowH;content.push(`<rect x="${x+c*colW}" y="${y}" width="${colW}" height="${rowH}" fill="#fff" stroke="${line}"/>${svgText(x+c*colW+colW/2,y+rowH*.66,value,{size:13})}`)}));
   return svgFrame(recipe,definition,content.join(''),options);
 }
 
 function chartAxes(x,y,width,height,maxValue,steps=5){let out=`<line x1="${x}" y1="${y}" x2="${x+width}" y2="${y}" stroke="${ink}" stroke-width="2"/><line x1="${x}" y1="${y}" x2="${x}" y2="${y-height}" stroke="${ink}" stroke-width="2"/>`;for(let i=0;i<=steps;i+=1){const py=y-height*i/steps;out+=`<line x1="${x}" y1="${py}" x2="${x+width}" y2="${py}" stroke="#e0dde6"/>${svgText(x-9,py+4,fmt(maxValue*i/steps),{anchor:'end',size:10})}`;}return out;}
 
 function renderBarChart(recipe, definition, options) {
-  const rows=(recipe.values.rows??[]).slice(0,8); const max=Math.max(1,n(recipe.values.max,Math.max(...rows.map(r=>n(r.value,0)),1))); const x=86,y=194,w=468,h=128;
+  const rows=(recipe.values.rows??[]).slice(0, BUILD2_ROW_VISUAL_LIMITS['bar-chart']); const max=Math.max(1,n(recipe.values.max,Math.max(...rows.map(r=>n(r.value,0)),1))); const x=86,y=194,w=468,h=128;
   let content = '';
   if (recipe.values.orientation === 'horizontal') {
     const rowHeight = h / Math.max(1, rows.length);
@@ -844,13 +879,13 @@ function renderBarChart(recipe, definition, options) {
 }
 
 function renderPictogram(recipe, definition, options) {
-  const rows=(recipe.values.rows??[]).slice(0,6);const key=Math.max(1,integer(recipe.values.key,1));const symbol=escapeMarkup(recipe.values.symbol??'●');let content=svgText(96,32,`${symbol} = ${key}`,{anchor:'start',size:15,weight:700});
+  const rows=(recipe.values.rows??[]).slice(0, BUILD2_ROW_VISUAL_LIMITS.pictogram);const key=Math.max(1,integer(recipe.values.key,1));const symbol=escapeMarkup(recipe.values.symbol??'●');let content=svgText(96,32,`${symbol} = ${key}`,{anchor:'start',size:15,weight:700});
   rows.forEach((row,index)=>{const y=66+index*28;const quantity=Math.max(0,n(row.value,0));const count=Math.floor(quantity/key);const remainder=quantity-(count*key);content+=svgText(102,y,row.label,{anchor:'start',size:13,weight:700});for(let i=0;i<Math.min(20,count);i+=1)content+=svgText(240+i*17,y,hidden(recipe,`symbol:${index}:${i}`,options)?'□':symbol,{size:16});if(remainder&& !hidden(recipe,`symbol:${index}:${count}`,options)){const partial = Math.abs(remainder/key-.5)<1e-9 ? '◐' : '?';content+=svgText(240+count*17,y,partial,{size:16});}});
   return svgFrame(recipe,definition,content,options);
 }
 
 function renderLineGraph(recipe, definition, options) {
-  const rows=(recipe.values.rows??[]).slice(0,10);const max=Math.max(1,n(recipe.values.yMax,Math.max(...rows.map(r=>n(r.value,0)),1)));const x=86,y=194,w=468,h=128;let content=chartAxes(x,y,w,h,max);const pts=rows.map((row,index)=>[x+(rows.length===1?w/2:index*w/(rows.length-1)),y-h*clamp(n(row.value,0),0,max)/max]);if(recipe.values.showPoints!==false&&!hidden(recipe,'point',options)&&pts.length){content+=`<polyline points="${pts.map(p=>p.join(',')).join(' ')}" fill="none" stroke="#4f568f" stroke-width="3"/>`;pts.forEach(([px,py],i)=>content+=`<circle cx="${px}" cy="${py}" r="4" fill="#4f568f"/>${svgText(px,y+18,rows[i].label,{size:10})}`);}return svgFrame(recipe,definition,content,options);
+  const rows=(recipe.values.rows??[]).slice(0, BUILD2_ROW_VISUAL_LIMITS['line-graph']);const max=Math.max(1,n(recipe.values.yMax,Math.max(...rows.map(r=>n(r.value,0)),1)));const x=86,y=194,w=468,h=128;let content=chartAxes(x,y,w,h,max);const pts=rows.map((row,index)=>[x+(rows.length===1?w/2:index*w/(rows.length-1)),y-h*clamp(n(row.value,0),0,max)/max]);if(recipe.values.showPoints!==false&&!hidden(recipe,'point',options)&&pts.length){content+=`<polyline points="${pts.map(p=>p.join(',')).join(' ')}" fill="none" stroke="#4f568f" stroke-width="3"/>`;pts.forEach(([px,py],i)=>content+=`<circle cx="${px}" cy="${py}" r="4" fill="#4f568f"/>${svgText(px,y+18,rows[i].label,{size:10})}`);}return svgFrame(recipe,definition,content,options);
 }
 
 function renderWorkspace(recipe, definition, options) {

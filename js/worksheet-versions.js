@@ -20,7 +20,9 @@ function asText(value, fallback = '') {
 function cloneValue(value) {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(cloneValue);
-  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneValue(child)]));
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !['__proto__', 'prototype', 'constructor'].includes(key))
+    .map(([key, child]) => [key, cloneValue(child)]));
 }
 
 function sameValue(left, right) {
@@ -32,7 +34,10 @@ function mergeValue(base, patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return cloneValue(patch);
   const target = asObject(base);
   const result = { ...cloneValue(target) };
-  for (const [key, value] of Object.entries(patch)) result[key] = mergeValue(target[key], value);
+  for (const [key, value] of Object.entries(patch)) {
+    if (['__proto__', 'prototype', 'constructor'].includes(key)) continue;
+    result[key] = mergeValue(target[key], value);
+  }
   return result;
 }
 
@@ -49,6 +54,165 @@ function diffValue(base, target) {
 
 function uniqueStrings(values) {
   return [...new Set((Array.isArray(values) ? values : []).filter((value) => typeof value === 'string'))];
+}
+
+const VALID_STYLE_PRESETS = new Set(['calm', 'clear', 'compact', 'guided', 'assessment', 'homework']);
+const VALID_RESPONSE_TYPES = new Set([
+  'none', 'short-answer', 'answer-box', 'calculation-area', 'squared-working',
+  'lined-explanation', 'unlined-thinking', 'two-methods', 'prove-it',
+  'table-completion', 'diagram-construction', 'labelled-steps', 'rough-working',
+  'model-completion', 'short-line', 'open-box', 'writing-lines', 'grid',
+]);
+
+function safeBoolean(value, fallback) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function safeNumber(value, fallback, min, max) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+}
+
+function normaliseResolvedSettings(value, fallback = {}) {
+  const source = { ...asObject(fallback), ...asObject(value) };
+  const accentFallback = /^#[0-9a-f]{6}$/i.test(fallback.accentColor) ? fallback.accentColor : '#4f568f';
+  const totalMarks = source.totalMarks == null ? null : safeNumber(source.totalMarks, null, 0, 999);
+  return {
+    ...source,
+    accentColor: /^#[0-9a-f]{6}$/i.test(source.accentColor) ? source.accentColor : accentFallback,
+    colorMode: ['colour', 'monochrome'].includes(source.colorMode) ? source.colorMode : (fallback.colorMode ?? 'colour'),
+    columns: source.columns === 2 ? 2 : 1,
+    density: ['compact', 'standard', 'spacious'].includes(source.density) ? source.density : (fallback.density ?? 'standard'),
+    typeface: ['system', 'sans', 'rounded'].includes(source.typeface) ? source.typeface : (fallback.typeface ?? 'system'),
+    workingSpaceStyle: ['lines', 'grid', 'open'].includes(source.workingSpaceStyle) ? source.workingSpaceStyle : (fallback.workingSpaceStyle ?? 'lines'),
+    orientation: source.orientation === 'landscape' ? 'landscape' : 'portrait',
+    pageSize: 'A4',
+    marginMm: safeNumber(source.marginMm, fallback.marginMm ?? 12, 8, 25),
+    stylePreset: VALID_STYLE_PRESETS.has(source.stylePreset) ? source.stylePreset : (fallback.stylePreset ?? 'calm'),
+    sectionStyle: ['plain', 'line', 'band', 'stage'].includes(source.sectionStyle) ? source.sectionStyle : (fallback.sectionStyle ?? 'line'),
+    bodyScale: ['small', 'standard', 'large'].includes(source.bodyScale) ? source.bodyScale : (fallback.bodyScale ?? 'standard'),
+    lineWeight: ['light', 'standard', 'strong'].includes(source.lineWeight) ? source.lineWeight : (fallback.lineWeight ?? 'light'),
+    showNameField: safeBoolean(source.showNameField, fallback.showNameField ?? true),
+    showDateField: safeBoolean(source.showDateField, fallback.showDateField ?? true),
+    showClassField: safeBoolean(source.showClassField, fallback.showClassField ?? false),
+    questionNumbering: safeBoolean(source.questionNumbering, fallback.questionNumbering ?? true),
+    pageNumbers: safeBoolean(source.pageNumbers, fallback.pageNumbers ?? true),
+    showMarks: safeBoolean(source.showMarks, fallback.showMarks ?? false),
+    totalMarks,
+  };
+}
+
+function normaliseResolvedBlock(value, fallback = {}) {
+  const source = asObject(value);
+  const base = asObject(fallback);
+  const responseSource = { ...asObject(base.response), ...asObject(source.response) };
+  const compositionSource = { ...asObject(base.composition), ...asObject(source.composition) };
+  const layoutSource = { ...asObject(base.layout), ...asObject(source.layout) };
+  const teacherSource = { ...asObject(base.teacher), ...asObject(source.teacher) };
+  const rawModel = source.model;
+  const rawCompletedModel = teacherSource.completedModel;
+  return {
+    ...base,
+    ...source,
+    id: asText(source.id, asText(base.id)),
+    kind: ['question', 'heading', 'instruction'].includes(source.kind) ? source.kind : (base.kind ?? 'question'),
+    originalText: asText(source.originalText, asText(base.originalText)),
+    displayText: asText(source.displayText, asText(base.displayText)),
+    section: typeof source.section === 'string' ? source.section : (typeof base.section === 'string' ? base.section : null),
+    source: mergeValue(asObject(base.source), asObject(source.source)),
+    extracted: mergeValue(asObject(base.extracted), asObject(source.extracted)),
+    model: rawModel === null ? null : (rawModel && typeof rawModel === 'object' && !Array.isArray(rawModel) ? cloneValue(rawModel) : cloneValue(base.model ?? null)),
+    response: {
+      ...responseSource,
+      type: VALID_RESPONSE_TYPES.has(responseSource.type) ? responseSource.type : (base.response?.type ?? 'open-box'),
+      size: ['small', 'compact', 'medium', 'standard', 'large', 'generous'].includes(responseSource.size) ? responseSource.size : (base.response?.size ?? 'standard'),
+      customRows: safeNumber(responseSource.customRows, 0, 0, 14),
+      rows: safeNumber(responseSource.rows, base.response?.rows ?? 0, 0, 14),
+      lines: safeNumber(responseSource.lines, base.response?.lines ?? 0, 0, 14),
+    },
+    composition: {
+      ...compositionSource,
+      footprint: ['compact', 'standard', 'spacious', 'half', 'full', 'page'].includes(compositionSource.footprint) ? compositionSource.footprint : (base.composition?.footprint ?? 'standard'),
+      keepWithNext: safeBoolean(compositionSource.keepWithNext, base.composition?.keepWithNext ?? false),
+    },
+    layout: {
+      ...layoutSource,
+      columnSpan: ['auto', 'half', 'full'].includes(layoutSource.columnSpan) ? layoutSource.columnSpan : (base.layout?.columnSpan ?? 'auto'),
+      pageHint: safeNumber(layoutSource.pageHint, 0, 0, 999),
+      keepWithNext: safeBoolean(layoutSource.keepWithNext, base.layout?.keepWithNext ?? false),
+      manualBreakBefore: safeBoolean(layoutSource.manualBreakBefore, base.layout?.manualBreakBefore ?? false),
+    },
+    warnings: Array.isArray(source.warnings) ? source.warnings.filter((warning) => warning && typeof warning === 'object').map(cloneValue) : cloneValue(base.warnings ?? []),
+    teacher: {
+      ...teacherSource,
+      answer: teacherSource.answer ?? null,
+      notes: asText(teacherSource.notes),
+      expectedMethod: asText(teacherSource.expectedMethod),
+      misconception: asText(teacherSource.misconception),
+      markingNote: asText(teacherSource.markingNote),
+      completedModel: rawCompletedModel === null ? null : (rawCompletedModel && typeof rawCompletedModel === 'object' && !Array.isArray(rawCompletedModel) ? cloneValue(rawCompletedModel) : cloneValue(base.teacher?.completedModel ?? null)),
+    },
+  };
+}
+
+function normaliseResolvedArchitecture(value, fallback = {}) {
+  const source = { ...asObject(fallback), ...asObject(value) };
+  const fallbackHeader = asObject(fallback.header);
+  const header = asObject(source.header);
+  const fallbackFooter = asObject(fallback.footer);
+  const footer = asObject(source.footer);
+  const fallbackNumbering = asObject(fallback.numbering);
+  const numbering = asObject(source.numbering);
+  const headerFields = header.fields && typeof header.fields === 'object' && !Array.isArray(header.fields)
+    ? header.fields
+    : asObject(fallbackHeader.fields);
+  const footerFields = Array.isArray(footer.fields)
+    ? uniqueStrings(footer.fields)
+    : Array.isArray(fallbackFooter.fields) ? uniqueStrings(fallbackFooter.fields) : ['title', 'page-number'];
+  return {
+    ...source,
+    compositionMode: ['flow', 'rows', 'deliberate-pages'].includes(source.compositionMode)
+      ? source.compositionMode
+      : (['flow', 'rows', 'deliberate-pages'].includes(fallback.compositionMode) ? fallback.compositionMode : 'flow'),
+    stylePreset: VALID_STYLE_PRESETS.has(source.stylePreset)
+      ? source.stylePreset
+      : (VALID_STYLE_PRESETS.has(fallback.stylePreset) ? fallback.stylePreset : 'calm'),
+    sections: Array.isArray(source.sections)
+      ? source.sections.filter((section) => section && typeof section === 'object').map((section) => ({
+        ...section,
+        id: asText(section.id),
+        headingId: typeof section.headingId === 'string' ? section.headingId : null,
+        name: asText(section.name, 'Section'),
+        layout: ['flow', 'rows', 'deliberate-pages'].includes(section.layout) ? section.layout : 'flow',
+        startOnNewPage: safeBoolean(section.startOnNewPage, false),
+      })).filter((section) => section.id)
+      : cloneValue(fallback.sections ?? []),
+    numbering: {
+      ...numbering,
+      mode: ['automatic', 'manual'].includes(numbering.mode) ? numbering.mode : (['automatic', 'manual'].includes(fallbackNumbering.mode) ? fallbackNumbering.mode : 'automatic'),
+      restartAtSections: safeBoolean(numbering.restartAtSections, safeBoolean(fallbackNumbering.restartAtSections, false)),
+    },
+    header: {
+      ...header,
+      layout: ['compact', 'standard', 'spacious'].includes(header.layout)
+        ? header.layout
+        : (['compact', 'standard', 'spacious'].includes(fallbackHeader.layout) ? fallbackHeader.layout : 'standard'),
+      fields: cloneValue(headerFields),
+    },
+    footer: {
+      ...footer,
+      fields: footerFields,
+    },
+  };
+}
+
+function normaliseResolvedPageArrangement(value, fallback = {}) {
+  const source = { ...asObject(fallback), ...asObject(value) };
+  return {
+    ...source,
+    manualBreakBefore: uniqueStrings(source.manualBreakBefore),
+    pageOverrides: cloneValue(asObject(source.pageOverrides)),
+  };
 }
 
 export function createEmptyOverrides() {
@@ -185,15 +349,28 @@ export function resolveWorksheetVersion(worksheet, versionId = worksheet?.versio
   const orphanedBlockIds = Object.keys(overrides.blockPatches).filter((id) => !baseById.has(id) && !overrides.addedBlocks.some((block) => block.id === id));
   const blocks = masterBlocks
     .filter((block) => !hidden.has(block.id))
-    .map((block) => mergeValue(block, overrides.blockPatches[block.id]));
+    .map((block) => normaliseResolvedBlock(mergeValue(block, overrides.blockPatches[block.id]), block));
   for (const added of overrides.addedBlocks) {
     if (!added?.id || hidden.has(added.id) || baseById.has(added.id)) continue;
-    blocks.push(mergeValue(added, overrides.blockPatches[added.id]));
+    const resolvedAdded = normaliseResolvedBlock(mergeValue(added, overrides.blockPatches[added.id]), added);
+    if (resolvedAdded.id) blocks.push(resolvedAdded);
   }
-  const metadata = mergeValue(worksheet.metadata, overrides.metadata);
-  const settings = mergeValue(worksheet.settings, overrides.settings);
-  const architecture = mergeValue(worksheet.architecture, overrides.architecture);
-  const pageArrangement = mergeValue(worksheet.pageArrangement, overrides.pageArrangement);
+  const rawMetadata = mergeValue(worksheet.metadata, overrides.metadata);
+  const metadata = {
+    ...asObject(worksheet.metadata),
+    ...asObject(rawMetadata),
+    name: asText(rawMetadata?.name, asText(worksheet.metadata?.name, 'Untitled worksheet')),
+    title: asText(rawMetadata?.title, asText(worksheet.metadata?.title, 'Maths worksheet')),
+    topic: asText(rawMetadata?.topic),
+    learningIntention: asText(rawMetadata?.learningIntention),
+    successCriteria: asText(rawMetadata?.successCriteria),
+    teacher: asText(rawMetadata?.teacher),
+    shortInstruction: asText(rawMetadata?.shortInstruction),
+    className: asText(rawMetadata?.className),
+  };
+  const settings = normaliseResolvedSettings(mergeValue(worksheet.settings, overrides.settings), worksheet.settings);
+  const architecture = normaliseResolvedArchitecture(mergeValue(worksheet.architecture, overrides.architecture), worksheet.architecture);
+  const pageArrangement = normaliseResolvedPageArrangement(mergeValue(worksheet.pageArrangement, overrides.pageArrangement), worksheet.pageArrangement);
   const ordered = renumberResolvedBlocks(reorderBlocks(blocks, overrides.order), settings, architecture);
   return {
     ...worksheet,

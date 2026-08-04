@@ -17,23 +17,24 @@ import {
   createResponseRecipe,
   createStore,
   loadCurrentProject,
+  getCurrentProjectId,
   listProjects,
   deleteProject,
   duplicateProject as duplicateStoredProject,
-  saveProject,
   worksheetActions,
   createId,
-} from './state.js?v=build3-v4';
-import { paginateWorksheet, mmToPx } from './pagination.js?v=build3-v4';
+} from './state.js?v=release-v1';
+import { paginateWorksheet, mmToPx } from './pagination.js?v=release-v1';
 import {
   SECTION_ROLES,
   STYLE_PRESETS,
   WORKSHEET_PURPOSES,
+  footprintForPattern,
   suggestNewQuestionOrder,
   suggestWorksheetArchitecture,
-} from './worksheet-architecture.js?v=build3-v4';
-import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=build3-v4';
-import { createSafeNumberVariation } from './number-variation.js?v=build3-v4';
+} from './worksheet-architecture.js?v=release-v1';
+import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=release-v1';
+import { createSafeNumberVariation } from './number-variation.js?v=release-v1';
 
 const SAMPLE_TEXT = `Place value
 
@@ -60,7 +61,9 @@ const projectDialog = document.querySelector('#project-dialog');
 const settingsDialog = document.querySelector('#settings-dialog');
 const versionsDialog = document.querySelector('#versions-dialog');
 
+const rememberedProjectId = getCurrentProjectId();
 const recovered = loadCurrentProject();
+const recoveryNeeded = Boolean(rememberedProjectId && !recovered);
 const initialWorksheet = recovered ?? createWorksheet();
 let store = createStore(initialWorksheet, { autosave: true, autosaveDelay: 140, saveInitial: Boolean(recovered) });
 // Keep Build 2's store as the master persistence/history source.  The UI sees
@@ -117,6 +120,93 @@ let ui = {
   dragging: null,
   lastPagination: null,
 };
+
+let renderedStage = null;
+let renderTicket = 0;
+let mobilePanelReturnAction = null;
+const SCROLL_REGIONS = [
+  '.workspace-scroll',
+  '.inspector',
+  '.question-navigator',
+  '.mobile-navigator-sheet',
+  '.model-bank-results',
+  '.settings-dialog-body',
+  '.versions-dialog-body',
+];
+
+function focusLocator(element, scope) {
+  if (!(element instanceof HTMLElement) || !scope?.contains(element)) return null;
+  if (element.id) return { id: element.id };
+  const attributes = ['data-role', 'data-action', 'data-key', 'data-path', 'data-value', 'data-id', 'data-edge'];
+  const selector = `${element.tagName.toLowerCase()}${attributes
+    .filter((name) => element.hasAttribute(name))
+    .map((name) => `[${name}="${CSS.escape(element.getAttribute(name))}"]`)
+    .join('')}`;
+  const matches = [...scope.querySelectorAll(selector)];
+  return { selector, index: Math.max(0, matches.indexOf(element)) };
+}
+
+function captureInteraction(scope) {
+  if (!scope) return null;
+  const active = document.activeElement;
+  const locator = focusLocator(active, scope);
+  const supportsSelection = active instanceof HTMLTextAreaElement
+    || (active instanceof HTMLInputElement && ['text', 'search', 'url', 'tel', 'password', 'email'].includes(active.type));
+  const selection = locator && supportsSelection
+    ? { start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection }
+    : null;
+  const scroll = SCROLL_REGIONS.flatMap((selector) => [...scope.querySelectorAll(selector)].map((element, index) => ({
+    selector,
+    index,
+    top: element.scrollTop,
+    left: element.scrollLeft,
+  })));
+  return { locator, selection, scroll, windowX: window.scrollX, windowY: window.scrollY };
+}
+
+function restoreInteraction(scope, snapshot) {
+  if (!scope || !snapshot) return;
+  for (const item of snapshot.scroll) {
+    const element = scope.querySelectorAll(item.selector)[item.index];
+    if (element) {
+      element.scrollTop = item.top;
+      element.scrollLeft = item.left;
+    }
+  }
+  let target = null;
+  if (snapshot.locator?.id) target = scope.querySelector(`#${CSS.escape(snapshot.locator.id)}`);
+  else if (snapshot.locator?.selector) target = scope.querySelectorAll(snapshot.locator.selector)[snapshot.locator.index];
+  if (target instanceof HTMLElement) {
+    target.focus({ preventScroll: true });
+    if (snapshot.selection && typeof target.setSelectionRange === 'function') {
+      try { target.setSelectionRange(snapshot.selection.start, snapshot.selection.end, snapshot.selection.direction); } catch { /* unsupported input type */ }
+    }
+  } else if (snapshot.locator) {
+    scope.setAttribute('tabindex', '-1');
+    scope.focus({ preventScroll: true });
+  }
+  window.scrollTo(snapshot.windowX, snapshot.windowY);
+}
+
+function persistencePresentation() {
+  const status = store.getPersistenceStatus?.() ?? 'saved';
+  if (status === 'saving') return { status, label: 'Saving…' };
+  if (status === 'error' || status === 'unavailable') return { status, label: 'Not saved' };
+  return { status: 'saved', label: 'Saved locally' };
+}
+
+function saveStateMarkup() {
+  const { status, label } = persistencePresentation();
+  return `<span class="save-state is-${status}" role="status">${label}</span>`;
+}
+
+function updateSaveState() {
+  const { status, label } = persistencePresentation();
+  document.querySelectorAll('.save-state').forEach((element) => {
+    element.className = `save-state is-${status}`;
+    element.textContent = label;
+  });
+}
 
 function readDraft() {
   try { return localStorage.getItem(DRAFT_KEY) ?? ''; } catch { return ''; }
@@ -393,9 +483,9 @@ function buildFirstDraft() {
     idFactory: (prefix) => createId(prefix),
     forceSuggestions: true,
   });
-  dispatchMaster(worksheetActions.replaceBlocks(structured.blocks));
-  dispatchMaster(worksheetActions.updateArchitecture(structured.architecture));
-  dispatchMaster(worksheetActions.applyStylePreset(structured.architecture.stylePreset));
+  dispatchMaster(worksheetActions.replaceStructure(structured.blocks, structured.architecture, {
+    stylePreset: structured.architecture.stylePreset,
+  }));
   ui.selectedId = blocks.find((block) => block.kind === 'question')?.id ?? blocks[0]?.id ?? null;
   ui.stage = 'make';
   clearDraft();
@@ -643,7 +733,7 @@ function renderEditorField(field, recipe) {
     </div>`;
   }
   if (field.type === 'boolean') {
-    return `<div class="switch-row"><span>${escapeHtml(field.label)}</span><label class="switch"><input type="checkbox" data-role="model-field" data-path="${escapeAttr(field.key)}" data-type="boolean" ${value ? 'checked' : ''}><span></span></label></div>`;
+    return `<div class="switch-row"><span>${escapeHtml(field.label)}</span><label class="switch"><input type="checkbox" aria-label="${escapeAttr(field.label)}" data-role="model-field" data-path="${escapeAttr(field.key)}" data-type="boolean" ${value ? 'checked' : ''}><span></span></label></div>`;
   }
   const inputType = ['integer', 'number', 'decimal'].includes(field.type) ? 'number' : 'text';
   const multiLine = ['table-rows'].includes(field.type);
@@ -703,7 +793,7 @@ function renderAttachedModel(block, worksheet) {
   return `<section class="inspector-section">
     <h3>${escapeHtml(definition?.name ?? 'Attached model')}</h3>
     <div class="choice-grid three" role="group" aria-label="Model completion state">
-      ${completionChoices.map(([value, label]) => `<button type="button" class="choice-button ${scaffold === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="${build2 ? 'scaffoldState' : 'completionState'}" data-value="${value}">${label}</button>`).join('')}
+      ${completionChoices.map(([value, label]) => `<button type="button" class="choice-button ${scaffold === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="${build2 ? 'scaffoldState' : 'completionState'}" data-value="${value}" aria-pressed="${scaffold === value}">${label}</button>`).join('')}
     </div>
     ${worksheet.intent === 'assessment' && (model.completionState !== 'blank' || isAnswerRevealRisk(model, { intent: worksheet.intent })) ? `<div class="warning-card"><strong>Assessment check</strong><span>This model may reveal a method, relationship or answer. Keep it only if that support is intentional.</span></div>` : ''}
     <div class="inspector-section">
@@ -719,25 +809,25 @@ function renderAttachedModel(block, worksheet) {
           ['thinking-model', 'Thinking model'],
           ['response-model', 'Pupil completes'],
           ['worked-example', 'Worked example'],
-        ].map(([value, label]) => `<button type="button" class="choice-button ${model.purpose === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="purpose" data-value="${value}">${label}</button>`).join('')}
+        ].map(([value, label]) => `<button type="button" class="choice-button ${model.purpose === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="purpose" data-value="${value}" aria-pressed="${model.purpose === value}">${label}</button>`).join('')}
       </div>
     </div>
     <div class="inspector-section">
       <h3>Placement</h3>
       <div class="choice-grid three">
-        ${['above', 'beside', 'beneath'].map((value) => `<button type="button" class="choice-button ${model.position === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="position" data-value="${value}">${humanOption(value)}</button>`).join('')}
+        ${['above', 'beside', 'beneath'].map((value) => `<button type="button" class="choice-button ${model.position === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="position" data-value="${value}" aria-pressed="${model.position === value}">${humanOption(value)}</button>`).join('')}
       </div>
       <div class="choice-grid three" style="margin-top:6px">
-        ${['compact', 'standard', 'large'].map((value) => `<button type="button" class="choice-button ${model.size === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="size" data-value="${value}">${humanOption(value)}</button>`).join('')}
+        ${['compact', 'standard', 'large'].map((value) => `<button type="button" class="choice-button ${model.size === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="size" data-value="${value}" aria-pressed="${model.size === value}">${humanOption(value)}</button>`).join('')}
       </div>
     </div>
     <div class="switch-row">
       <span>${modelBindingMode(model) === 'bound' ? 'Linked to question' : 'Detached model'}<small class="field-hint">${modelBindingMode(model) === 'bound' ? ' Values update when the wording or reading changes.' : ' Custom values stay independent.'}</small></span>
-      <label class="switch"><input type="checkbox" data-role="model-binding-toggle" ${modelBindingMode(model) === 'bound' ? 'checked' : ''}><span></span></label>
+      <label class="switch"><input type="checkbox" aria-label="Linked to question" data-role="model-binding-toggle" ${modelBindingMode(model) === 'bound' ? 'checked' : ''}><span></span></label>
     </div>
     <div class="switch-row">
       <span>Complete this model in the teacher version</span>
-      <label class="switch"><input type="checkbox" data-role="teacher-model-toggle" ${block.teacher.completedModel ? 'checked' : ''}><span></span></label>
+      <label class="switch"><input type="checkbox" aria-label="Complete this model in the teacher version" data-role="teacher-model-toggle" ${block.teacher.completedModel ? 'checked' : ''}><span></span></label>
     </div>
     <div class="inspector-actions">
       <button type="button" class="secondary" data-action="browse-models">Replace model</button>
@@ -774,7 +864,7 @@ function renderResponseControls(block) {
       <select id="response-type" data-role="response-type">${options.map(([value, label]) => `<option value="${value}" ${response.type === value ? 'selected' : ''}>${label}</option>`).join('')}</select>
     </div>
     <div class="choice-grid three" style="margin-top:8px">
-      ${['small', 'medium', 'large'].map((value) => `<button type="button" class="choice-button ${size === value ? 'is-selected' : ''}" data-action="set-response-size" data-value="${value}">${humanOption(value)}</button>`).join('')}
+      ${['small', 'medium', 'large'].map((value) => `<button type="button" class="choice-button ${size === value ? 'is-selected' : ''}" data-action="set-response-size" data-value="${value}" aria-pressed="${size === value}">${humanOption(value)}</button>`).join('')}
     </div>
     ${response.type !== 'none' ? `<div class="field" style="margin-top:8px"><label for="response-custom-rows">Custom rows <span class="field-hint">(optional)</span></label><input id="response-custom-rows" data-role="response-custom-rows" type="number" min="0" max="14" value="${Number(response.customRows) || ''}" placeholder="Use the size above"></div>` : ''}
     ${['lined-explanation', 'prove-it', 'writing-lines'].includes(response.type) ? `<div class="field" style="margin-top:8px"><label for="response-lines">Writing lines</label><input id="response-lines" data-role="response-lines" type="number" min="1" max="12" value="${Number(response.lines) || 4}"></div>` : ''}
@@ -805,11 +895,10 @@ function renderCompositionControls(block, worksheet) {
     <div class="field"><label for="block-pattern">Structure</label><select id="block-pattern" data-role="block-pattern">${patterns.map(([value, label]) => `<option value="${value}" ${composition.pattern === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
     <div class="field" style="margin-top:8px"><label for="manual-number">Manual number <span class="field-hint">(for example 4a)</span></label><input id="manual-number" data-role="manual-number" value="${escapeAttr(block.manualNumber ?? '')}" placeholder="Automatic"></div>
     <div class="choice-grid three" style="margin-top:8px" role="group" aria-label="Block footprint">
-      ${[['compact', 'Compact'], ['standard', 'Standard'], ['spacious', 'Spacious'], ['half', 'Half width'], ['full', 'Full width'], ['page', 'Full page']].map(([value, label]) => `<button type="button" class="choice-button ${composition.footprint === value ? 'is-selected' : ''}" data-action="set-footprint" data-value="${value}">${label}</button>`).join('')}
+      ${[['compact', 'Compact'], ['standard', 'Standard'], ['spacious', 'Spacious'], ['half', 'Half width'], ['full', 'Full width'], ['page', 'Full page']].map(([value, label]) => `<button type="button" class="choice-button ${composition.footprint === value ? 'is-selected' : ''}" data-action="set-footprint" data-value="${value}" aria-pressed="${composition.footprint === value}">${label}</button>`).join('')}
     </div>
     ${sections.length ? `<div class="field" style="margin-top:8px"><label for="block-section">Section</label><select id="block-section" data-role="block-section">${sections.map((section) => `<option value="${escapeAttr(section.id)}" ${currentSection === section.id ? 'selected' : ''}>${escapeHtml(section.name)}</option>`).join('')}</select></div>` : ''}
-    <div class="switch-row"><span>Keep question together</span><label class="switch"><input type="checkbox" data-role="keep-together" ${composition.keepTogether !== false ? 'checked' : ''}><span></span></label></div>
-    <div class="switch-row"><span>Keep with next block</span><label class="switch"><input type="checkbox" data-role="keep-with-next" ${composition.keepWithNext || block.layout?.keepWithNext ? 'checked' : ''}><span></span></label></div>
+    <div class="switch-row"><span>Keep with next block</span><label class="switch"><input type="checkbox" aria-label="Keep with next block" data-role="keep-with-next" ${composition.keepWithNext || block.layout?.keepWithNext ? 'checked' : ''}><span></span></label></div>
   </section>`;
 }
 
@@ -819,10 +908,10 @@ function isBuild2Model(family) {
 
 function bankDefinitionsForPicker() {
   const query = ui.modelSearch.trim();
-  if (ui.modelCategory && ui.modelCategory !== 'Build 1 essentials') {
+  if (ui.modelCategory && ui.modelCategory !== 'Core models') {
     return searchBuild2Models(query, { category: ui.modelCategory });
   }
-  if (ui.modelCategory === 'Build 1 essentials') {
+  if (ui.modelCategory === 'Core models') {
     const lower = query.toLowerCase();
     return listModelDefinitions().filter((definition) => !isBuild2Model(definition.id)).filter((definition) => !lower || [
       definition.name, definition.purpose, ...(definition.matchingTags ?? []), definition.id,
@@ -837,11 +926,11 @@ function bankDefinitionsForPicker() {
 }
 
 function renderModelBankPicker(block) {
-  const categories = ['Build 1 essentials', ...BUILD2_MODEL_CATEGORIES];
+  const categories = ['Core models', ...BUILD2_MODEL_CATEGORIES];
   const results = bankDefinitionsForPicker();
   const browseBody = (!ui.modelSearch.trim() && !ui.modelCategory)
     ? `<div class="model-category-list">${categories.map((category) => {
-      const count = category === 'Build 1 essentials'
+      const count = category === 'Core models'
         ? listModelDefinitions().filter((definition) => !isBuild2Model(definition.id)).length
         : searchBuild2Models('', { category }).length;
       return `<button type="button" class="model-category-button" data-action="choose-model-category" data-value="${escapeAttr(category)}"><span>${escapeHtml(category)}</span><small>${count} models</small></button>`;
@@ -924,7 +1013,7 @@ function renderInspector(worksheet) {
     const sectionIndex = (worksheet.architecture?.sections ?? []).findIndex((item) => item.id === block.section);
     return `<div class="inspector-content">
       <div class="field"><label for="selected-display-text">Printed wording</label><textarea id="selected-display-text" data-role="question-display">${escapeHtml(block.displayText)}</textarea></div>
-      ${block.kind === 'heading' ? `<section class="inspector-section"><h3>Section structure</h3><div class="field"><label for="section-role">Role</label><select id="section-role" data-role="section-role">${SECTION_ROLES.map((role) => `<option value="${role}" ${block.sectionMeta?.role === role ? 'selected' : ''}>${humanPurpose(role)}</option>`).join('')}</select></div><div class="field" style="margin-top:8px"><label for="section-layout">Layout</label><select id="section-layout" data-role="section-layout"><option value="flow" ${section.layout === 'flow' ? 'selected' : ''}>Flow</option><option value="rows" ${section.layout === 'rows' ? 'selected' : ''}>Rows for compact questions</option><option value="deliberate-pages" ${section.layout === 'deliberate-pages' ? 'selected' : ''}>Deliberate pages</option></select></div><div class="switch-row"><span>Start section on a new page</span><label class="switch"><input type="checkbox" data-role="section-new-page" ${section.startOnNewPage ? 'checked' : ''}><span></span></label></div><div class="choice-grid" style="margin-top:8px"><button type="button" class="choice-button" data-action="move-section" data-id="${escapeAttr(block.section)}" data-direction="up" ${sectionIndex <= 0 ? 'disabled' : ''}>↑ Move section</button><button type="button" class="choice-button" data-action="move-section" data-id="${escapeAttr(block.section)}" data-direction="down" ${sectionIndex < 0 || sectionIndex >= (worksheet.architecture?.sections?.length ?? 0) - 1 ? 'disabled' : ''}>↓ Move section</button></div><button type="button" class="ghost full-width" data-action="remove-section" data-id="${escapeAttr(block.section)}" style="margin-top:8px">Remove section, keep questions</button></section>` : `<section class="inspector-section"><h3>Shared instruction</h3><p>This stays with the next question and does not receive a model.</p></section>`}
+      ${block.kind === 'heading' ? `<section class="inspector-section"><h3>Section structure</h3><div class="field"><label for="section-role">Role</label><select id="section-role" data-role="section-role">${SECTION_ROLES.map((role) => `<option value="${role}" ${block.sectionMeta?.role === role ? 'selected' : ''}>${humanPurpose(role)}</option>`).join('')}</select></div><div class="field" style="margin-top:8px"><label for="section-layout">Layout</label><select id="section-layout" data-role="section-layout"><option value="flow" ${section.layout === 'flow' ? 'selected' : ''}>Flow</option><option value="rows" ${section.layout === 'rows' ? 'selected' : ''}>Rows for compact questions</option><option value="deliberate-pages" ${section.layout === 'deliberate-pages' ? 'selected' : ''}>Deliberate pages</option></select></div><div class="switch-row"><span>Start section on a new page</span><label class="switch"><input type="checkbox" aria-label="Start section on a new page" data-role="section-new-page" ${section.startOnNewPage ? 'checked' : ''}><span></span></label></div><div class="choice-grid" style="margin-top:8px"><button type="button" class="choice-button" data-action="move-section" data-id="${escapeAttr(block.section)}" data-direction="up" ${sectionIndex <= 0 ? 'disabled' : ''}>↑ Move section</button><button type="button" class="choice-button" data-action="move-section" data-id="${escapeAttr(block.section)}" data-direction="down" ${sectionIndex < 0 || sectionIndex >= (worksheet.architecture?.sections?.length ?? 0) - 1 ? 'disabled' : ''}>↓ Move section</button></div><button type="button" class="ghost full-width" data-action="remove-section" data-id="${escapeAttr(block.section)}" style="margin-top:8px">Remove section, keep questions</button></section>` : `<section class="inspector-section"><h3>Shared instruction</h3><p>This stays with the next question and does not receive a model.</p></section>`}
       ${renderBlockOrderControls(block, worksheet)}
     </div>`;
   }
@@ -969,18 +1058,21 @@ function renderBlockOrderControls(block, worksheet) {
       <button type="button" class="choice-button" data-action="move-page" data-id="${block.id}" data-direction="previous">Previous page</button>
       <button type="button" class="choice-button" data-action="move-page" data-id="${block.id}" data-direction="next">Next page</button>
     </div>
-    <div class="switch-row"><span>Start on a new page</span><label class="switch"><input type="checkbox" data-role="manual-break" ${breakSet.has(block.id) ? 'checked' : ''}><span></span></label></div>
+    <div class="switch-row"><span>Start on a new page</span><label class="switch"><input type="checkbox" aria-label="Start this block on a new page" data-role="manual-break" ${breakSet.has(block.id) ? 'checked' : ''}><span></span></label></div>
   </section>`;
 }
 
 function renderNavigator(worksheet, mobile = false) {
   const pagination = ui.lastPagination ?? paginateWorksheet(worksheet, { outputView: worksheet.outputView });
-  return `<div class="${mobile ? 'mobile-navigator-sheet' : 'question-navigator'} ${mobile && ui.navigatorOpen ? 'is-open' : ''}">
-    <div class="panel-header"><h2>Questions</h2><span class="panel-count">${worksheet.blocks.filter((block) => block.kind === 'question').length}</span><button type="button" class="tool-button" data-action="add-section" aria-label="Add a section">＋</button>${mobile ? '<button type="button" class="tool-button" data-action="close-mobile-panels">×</button>' : ''}</div>
+  const panelAttributes = mobile
+    ? 'id="mobile-question-navigator" role="region" aria-labelledby="mobile-question-navigator-title" tabindex="-1"'
+    : 'aria-label="Question navigator"';
+  return `<div ${panelAttributes} class="${mobile ? 'mobile-navigator-sheet' : 'question-navigator'} ${mobile && ui.navigatorOpen ? 'is-open' : ''}">
+    <div class="panel-header"><h2 ${mobile ? 'id="mobile-question-navigator-title"' : ''}>Questions</h2><span class="panel-count">${worksheet.blocks.filter((block) => block.kind === 'question').length}</span><button type="button" class="tool-button" data-action="add-section" aria-label="Add a section">＋</button>${mobile ? '<button type="button" class="tool-button" data-action="close-mobile-panels" aria-label="Close questions panel">×</button>' : ''}</div>
     <div class="navigator-list">
       ${worksheet.blocks.map((block) => {
         const warning = block.warnings?.length;
-        return `<button type="button" class="navigator-item ${ui.selectedId === block.id ? 'is-selected' : ''}" data-action="select-block" data-id="${block.id}">
+        return `<button type="button" class="navigator-item ${ui.selectedId === block.id ? 'is-selected' : ''}" data-action="select-block" data-id="${block.id}" ${ui.selectedId === block.id ? 'aria-current="true"' : ''}>
           <span class="nav-number">${block.kind === 'question' ? block.number ?? '•' : '§'}</span>
           <span class="nav-copy"><strong>${escapeHtml(block.displayText)}</strong><span class="nav-meta"><span class="nav-dot ${warning ? 'warning' : block.model ? '' : 'none'}"></span>${block.kind !== 'question' ? humanOption(block.kind) : block.model ? getModelDefinition(block.model.family)?.name : 'No model'}</span></span>
         </button>`;
@@ -1042,26 +1134,27 @@ function renderQuestionCore(block, placement, outputView, worksheet) {
     : '';
   if (!model) return `${question}${support}`;
   const modelHeight = placement.measurement?.breakdown?.modelMm ?? 28;
-  const rendered = renderModel(model, { intent: store.getState().intent, outputView, instanceId: `${block.id}-${outputView}` });
-  const slot = `<div class="model-slot position-${position}" style="height:${modelHeight}mm" data-model-slot="${block.id}" aria-label="Attached ${escapeAttr(getModelDefinition(model.family)?.name ?? 'mathematical model')}">${rendered}</div>`;
+  const rendered = renderModel(model, { intent: worksheet.intent, outputView, instanceId: `${block.id}-${outputView}` });
+  const slot = `<div class="model-slot position-${position}" style="height:${modelHeight}mm" data-model-slot="${block.id}">${rendered}</div>`;
   if (position === 'above') return `${slot}${question}${support}`;
   if (position === 'beside') return `<div class="question-layout-beside">${question}${slot}</div>${support}`;
   return `${question}${slot}${support}`;
 }
 
-function renderWorksheetBlock(block, placement, worksheet, outputView) {
+function renderWorksheetBlock(block, placement, worksheet, outputView, context = 'editor') {
   const left = placement.xMm;
   const top = placement.yMm;
   const width = placement.widthMm;
   const height = placement.heightMm;
   const style = `left:${left}mm;top:${top}mm;width:${width}mm;height:${height}mm;--block-pad:${placement.measurement?.breakdown?.paddingMm ?? 3}mm`;
+  const selectedClass = context === 'editor' && ui.selectedId === block.id ? 'is-selected' : '';
   if (block.kind === 'heading') {
     const role = block.sectionMeta?.role ?? 'custom';
     const roleIcon = { fluency: '•', 'guided-practice': '→', reasoning: '↗', 'problem-solving': '◇', challenge: '+', reflection: '↺' }[role] ?? '§';
-    return `<section class="question-block section-block section-${escapeAttr(role)} ${ui.selectedId === block.id ? 'is-selected' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}"><span aria-hidden="true">${roleIcon}</span>${escapeHtml(block.displayText)}</section>`;
+    return `<section class="question-block section-block section-${escapeAttr(role)} ${selectedClass}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}"><span aria-hidden="true">${roleIcon}</span>${escapeHtml(block.displayText)}</section>`;
   }
   if (block.kind === 'instruction') {
-    return `<section class="question-block instruction-block ${ui.selectedId === block.id ? 'is-selected' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}"><p class="question-copy">${escapeHtml(block.displayText)}</p></section>`;
+    return `<section class="question-block instruction-block ${selectedClass}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}"><p class="question-copy">${escapeHtml(block.displayText)}</p></section>`;
   }
   const warnings = placement.measurement?.warnings ?? [];
   const teacher = outputView === 'teacher' && (block.teacher.answer != null || block.teacher.notes || block.teacher.expectedMethod || block.teacher.misconception || block.teacher.markingNote)
@@ -1076,12 +1169,12 @@ function renderWorksheetBlock(block, placement, worksheet, outputView) {
   const answer = outputView === 'answer' && block.teacher?.answer != null && String(block.teacher.answer).length
     ? `<div class="answer-note"><strong>Answer:</strong> ${escapeHtml(block.teacher.answer)}</div>`
     : '';
-  return `<article class="question-block ${ui.selectedId === block.id ? 'is-selected' : ''} ${warnings.some((warning) => warning.code === 'block-overcrowded') ? 'is-overcrowded' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}">
+  return `<article class="question-block ${selectedClass} ${warnings.some((warning) => warning.code === 'block-overcrowded') ? 'is-overcrowded' : ''}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}">
     ${renderQuestionCore(block, placement, outputView, worksheet)}
     ${renderResponseSpace(block, placement)}
     ${teacher}
     ${answer}
-    <div class="block-screen-tools screen-only"><button type="button" class="block-drag-handle" draggable="true" data-drag-id="${block.id}" aria-label="Drag question ${block.number ?? ''}">${icon('handle')}</button><button type="button" data-action="select-block" data-id="${block.id}" aria-label="Edit question ${block.number ?? ''}">${icon('edit')}</button></div>
+    ${context === 'editor' ? `<div class="block-screen-tools screen-only"><button type="button" class="block-drag-handle" draggable="true" data-drag-id="${block.id}" aria-label="Drag question ${block.number ?? ''}">${icon('handle')}</button><button type="button" data-action="select-block" data-id="${block.id}" aria-label="Edit question ${block.number ?? ''}">${icon('edit')}</button></div>` : ''}
   </article>`;
 }
 
@@ -1123,26 +1216,27 @@ function worksheetPageClass(worksheet) {
   return classes.join(' ');
 }
 
-function renderPage(worksheet, pagination, page, outputView, context = 'editor') {
+function renderPage(worksheet, pagination, page, outputView, context = 'editor', blockById = new Map()) {
   const shellContext = context === 'print-preview' ? 'print-preview' : 'editor-preview';
   const pageGeometry = pagination.geometry.page;
-  return `<div class="a4-shell" data-page-shell data-preview-context="${shellContext}" data-page-width-px="${pageGeometry.widthPx}" data-page-height-px="${pageGeometry.heightPx}" style="--mps-page-width:${pageGeometry.widthMm}mm;--mps-page-height:${pageGeometry.heightMm}mm">
+  return `<div class="a4-shell orientation-${pageGeometry.orientation}" data-page-shell data-preview-context="${shellContext}" data-page-width-px="${pageGeometry.widthPx}" data-page-height-px="${pageGeometry.heightPx}" style="--mps-page-width:${pageGeometry.widthMm}mm;--mps-page-height:${pageGeometry.heightMm}mm">
     <span class="page-badge screen-only">Page ${page.number} of ${pagination.pageCount}</span>
     <section class="${worksheetPageClass(worksheet)} orientation-${pageGeometry.orientation}" data-page-number="${page.number}" aria-label="Worksheet page ${page.number} of ${pagination.pageCount}" style="--sheet-accent:${escapeAttr(worksheet.settings.accentColor)};--mps-page-width:${pageGeometry.widthMm}mm;--mps-page-height:${pageGeometry.heightMm}mm">
       ${page.number === 1 ? worksheetHeader(worksheet, pagination.geometry) : ''}
       ${page.items.map((placement) => {
-        const block = worksheet.blocks.find((item) => item.id === placement.blockId);
-        return block ? renderWorksheetBlock(block, placement, worksheet, outputView) : '';
+        const block = blockById.get(placement.blockId);
+        return block ? renderWorksheetBlock(block, placement, worksheet, outputView, context) : '';
       }).join('')}
       ${worksheet.settings.pageNumbers ? `<footer class="worksheet-footer" style="position:absolute;left:${pagination.geometry.margins.left}mm;right:${pagination.geometry.margins.right}mm;bottom:${Math.max(3, pagination.geometry.margins.bottom - 2)}mm"><span>${escapeHtml(worksheet.architecture?.footer?.fields?.includes('version-label') ? `${worksheet.metadata.title} · ${worksheet.metadata.versionLabel ?? ''}`.replace(/ · $/, '') : worksheet.metadata.title)}</span><span class="page-number">${page.number}</span></footer>` : ''}
     </section>
   </div>`;
 }
 
-function renderPageStack(worksheet, outputView, context = 'editor') {
-  const pagination = paginateWorksheet(worksheet, { outputView });
+function renderPageStack(worksheet, outputView, context = 'editor', preparedPagination = null) {
+  const pagination = preparedPagination ?? paginateWorksheet(worksheet, { outputView });
   ui.lastPagination = pagination;
-  return `<div class="page-stack">${pagination.pages.map((page) => renderPage(worksheet, pagination, page, outputView, context)).join('')}</div>`;
+  const blockById = new Map(worksheet.blocks.map((block) => [block.id, block]));
+  return `<div class="page-stack">${pagination.pages.map((page) => renderPage(worksheet, pagination, page, outputView, context, blockById)).join('')}</div>`;
 }
 
 function renderMake() {
@@ -1156,7 +1250,7 @@ function renderMake() {
     <div class="make-toolbar" data-screen-only>
       <div class="project-title-wrap">
         <input class="project-title-input" data-role="project-title" value="${escapeAttr(worksheet.metadata.name)}" aria-label="Worksheet project name">
-        <span class="save-state">Saved</span>
+        ${saveStateMarkup()}
       </div>
       <div class="toolbar-group">
         <button type="button" class="version-chip" data-action="open-versions" aria-label="Open worksheet versions"><span>${escapeHtml(worksheet.activeVersion?.name ?? 'Standard')}</span><small>${worksheet.activeVersionId === 'master' ? 'Master' : 'Version'}</small></button>
@@ -1180,7 +1274,7 @@ function renderMake() {
           </div>
         </details>
         <span class="toolbar-divider"></span>
-        <button type="button" class="icon-button" data-action="open-settings">${icon('settings')}<span class="settings-label">Page settings</span></button>
+        <button type="button" class="icon-button" data-action="open-settings" aria-label="Open page settings">${icon('settings')}<span class="settings-label">Page settings</span></button>
         <span class="toolbar-divider"></span>
         <span class="panel-count">${pagination.pageCount} ${pagination.pageCount === 1 ? 'page' : 'pages'}</span>
       </div>
@@ -1188,17 +1282,17 @@ function renderMake() {
     <div class="make-layout">
       ${renderNavigator(worksheet)}
       <div class="workspace-scroll" aria-label="A4 worksheet preview">
-        ${renderPageStack(worksheet, worksheet.outputView, 'editor')}
+        ${renderPageStack(worksheet, worksheet.outputView, 'editor', pagination)}
       </div>
-      <aside class="inspector ${ui.inspectorOpen ? 'is-open' : ''}" aria-label="Selected question controls">
-        <div class="panel-header"><h2>Selected block</h2><button type="button" class="tool-button" data-action="close-mobile-panels" aria-label="Close question controls">×</button></div>
+      <aside id="question-inspector" class="inspector ${ui.inspectorOpen ? 'is-open' : ''}" role="region" aria-labelledby="question-inspector-title" tabindex="-1">
+        <div class="panel-header"><h2 id="question-inspector-title">Selected block</h2><button type="button" class="tool-button" data-action="close-mobile-panels" aria-label="Close question controls">×</button></div>
         ${renderInspector(worksheet)}
       </aside>
     </div>
     ${renderNavigator(worksheet, true)}
     <div class="mobile-panel-tabs" data-screen-only>
-      <button type="button" data-action="open-navigator">Questions</button>
-      <button type="button" data-action="open-inspector">Adjust selected</button>
+      <button type="button" data-action="open-navigator" aria-controls="mobile-question-navigator" aria-expanded="${ui.navigatorOpen}">Questions</button>
+      <button type="button" data-action="open-inspector" aria-controls="question-inspector" aria-expanded="${ui.inspectorOpen}">Adjust selected</button>
     </div>
   </section>`;
 }
@@ -1213,12 +1307,12 @@ function collectPrintChecks(worksheet, pagination, outputView) {
   });
   const answerLeaks = worksheet.blocks.filter((block) => block.model && (evaluateAnswerLeak(block.model, { intent: worksheet.intent }).risk !== 'none' || isAnswerRevealRisk(block.model, { intent: worksheet.intent }))).length;
   checks.push({ warning: pagination.hasOverflow, text: pagination.hasOverflow ? 'One complete block is too tall for its page.' : 'No page overflow or clipped blocks detected.' });
-  checks.push({ warning: pagination.tooSmallModelBlockIds.length > 0, text: pagination.tooSmallModelBlockIds.length ? `${pagination.tooSmallModelBlockIds.length} model may be too small when printed.` : 'Every model remains above its minimum print size.' });
-  checks.push({ warning: worksheet.intent === 'assessment' && answerLeaks > 0 && outputView === 'pupil', text: worksheet.intent === 'assessment' && answerLeaks > 0 && outputView === 'pupil' ? `${answerLeaks} assessment model may reveal assessed thinking.` : 'No unacknowledged answer-reveal risk in this output.' });
-  checks.push({ warning: pagination.blocksWithoutResponseSpace.length > 0, text: pagination.blocksWithoutResponseSpace.length ? `${pagination.blocksWithoutResponseSpace.length} question has no meaningful response space.` : 'Every question has a response route or completion model.' });
+  checks.push({ warning: pagination.tooSmallModelBlockIds.length > 0, text: pagination.tooSmallModelBlockIds.length ? `${pagination.tooSmallModelBlockIds.length} ${pagination.tooSmallModelBlockIds.length === 1 ? 'model may' : 'models may'} be too small when printed.` : 'Every model remains above its minimum print size.' });
+  checks.push({ warning: worksheet.intent === 'assessment' && answerLeaks > 0 && outputView === 'pupil', text: worksheet.intent === 'assessment' && answerLeaks > 0 && outputView === 'pupil' ? `${answerLeaks} assessment ${answerLeaks === 1 ? 'model may' : 'models may'} reveal assessed thinking.` : 'No unacknowledged answer-reveal risk in this output.' });
+  checks.push({ warning: pagination.blocksWithoutResponseSpace.length > 0, text: pagination.blocksWithoutResponseSpace.length ? `${pagination.blocksWithoutResponseSpace.length} ${pagination.blocksWithoutResponseSpace.length === 1 ? 'question has' : 'questions have'} no meaningful response space.` : 'Every question has a response route or completion model.' });
   checks.push({ warning: modelWarnings.some((warning) => warning.severity === 'error'), text: modelWarnings.some((warning) => warning.severity === 'error') ? 'A model has invalid mathematical values and will show a safety message.' : 'All attached models pass mathematical integrity checks.' });
-  checks.push({ warning: pagination.crowdedPageNumbers?.length > 0, text: pagination.crowdedPageNumbers?.length ? `Page ${pagination.crowdedPageNumbers.join(', ')} is crowded. Reduce working space or move a question.` : 'No page is overcrowded.' });
-  checks.push({ warning: pagination.sparsePageNumbers?.length > 0, text: pagination.sparsePageNumbers?.length ? `Page ${pagination.sparsePageNumbers.join(', ')} has a large unused area.` : 'No accidental sparse page detected.' });
+  checks.push({ warning: pagination.crowdedPageNumbers?.length > 0, text: pagination.crowdedPageNumbers?.length ? `${pagination.crowdedPageNumbers.length === 1 ? 'Page' : 'Pages'} ${pagination.crowdedPageNumbers.join(', ')} ${pagination.crowdedPageNumbers.length === 1 ? 'is' : 'are'} crowded. Reduce working space or move a question.` : 'No page is overcrowded.' });
+  checks.push({ warning: pagination.sparsePageNumbers?.length > 0, text: pagination.sparsePageNumbers?.length ? `${pagination.sparsePageNumbers.length === 1 ? 'Page' : 'Pages'} ${pagination.sparsePageNumbers.join(', ')} ${pagination.sparsePageNumbers.length === 1 ? 'has' : 'have'} a large unused area.` : 'No accidental sparse page detected.' });
   checks.push({ warning: pagination.orphanedHeadingBlockIds?.length > 0, text: pagination.orphanedHeadingBlockIds?.length ? 'A section heading is isolated from its question.' : 'Section headings stay with the next block.' });
   return checks;
 }
@@ -1240,9 +1334,9 @@ function renderPrint() {
         <p>These are the exact A4 pages the browser will print or save as PDF.</p>
       </header>
       <div class="view-toggle" role="group" aria-label="Version to print">
-        <button type="button" data-action="set-output-view" data-value="pupil" class="${outputView === 'pupil' ? 'is-selected' : ''}">Pupil version</button>
-        <button type="button" data-action="set-output-view" data-value="teacher" class="${outputView === 'teacher' ? 'is-selected' : ''}">Teacher version</button>
-        <button type="button" data-action="set-output-view" data-value="answer" class="${outputView === 'answer' ? 'is-selected' : ''}">Answer version</button>
+        <button type="button" data-action="set-output-view" data-value="pupil" class="${outputView === 'pupil' ? 'is-selected' : ''}" aria-pressed="${outputView === 'pupil'}">Pupil version</button>
+        <button type="button" data-action="set-output-view" data-value="teacher" class="${outputView === 'teacher' ? 'is-selected' : ''}" aria-pressed="${outputView === 'teacher'}">Teacher version</button>
+        <button type="button" data-action="set-output-view" data-value="answer" class="${outputView === 'answer' ? 'is-selected' : ''}" aria-pressed="${outputView === 'answer'}">Answer version</button>
       </div>
     </div>
     <div class="print-summary-grid" data-screen-only>
@@ -1252,7 +1346,7 @@ function renderPrint() {
       <div class="summary-card"><strong>${warnings || '✓'}</strong><span>${warnings === 1 ? 'check to review' : warnings ? 'checks to review' : 'clear to print'}</span></div>
     </div>
     <div class="print-checks">
-      <div class="print-preview-panel">${renderPageStack(worksheet, outputView, 'print-preview')}</div>
+      <div class="print-preview-panel">${renderPageStack(worksheet, outputView, 'print-preview', pagination)}</div>
       <aside class="print-controls" data-screen-only>
         <div class="print-card">
           <h2>${outputView === 'teacher' ? 'Teacher version' : outputView === 'answer' ? 'Answer version' : 'Pupil version'}</h2>
@@ -1280,7 +1374,9 @@ function renderSettingsContent() {
   const settings = worksheet.settings;
   const architecture = worksheet.architecture ?? {};
   const headerFields = architecture.header?.fields ?? {};
-  document.querySelector('#settings-content').innerHTML = `<div class="settings-grid">
+  const content = document.querySelector('#settings-content');
+  const interaction = captureInteraction(content);
+  content.innerHTML = `<div class="settings-grid">
     <section class="settings-group">
       <h3>Worksheet heading</h3>
       <div class="field"><label for="sheet-title">Printed title</label><input id="sheet-title" data-role="metadata-field" data-key="title" value="${escapeAttr(worksheet.metadata.title)}"></div>
@@ -1295,18 +1391,18 @@ function renderSettingsContent() {
         ['showNameField', 'Name field'],
         ['showDateField', 'Date field'],
         ['showClassField', 'Class field'],
-      ].map(([key, label]) => `<div class="switch-row"><span>${label}</span><label class="switch"><input type="checkbox" data-role="settings-checkbox" data-key="${key}" ${settings[key] ? 'checked' : ''}><span></span></label></div>`).join('')}
+      ].map(([key, label]) => `<div class="switch-row"><span>${label}</span><label class="switch"><input type="checkbox" aria-label="${escapeAttr(label)}" data-role="settings-checkbox" data-key="${key}" ${settings[key] ? 'checked' : ''}><span></span></label></div>`).join('')}
       ${[
         ['topic', 'Show topic'],
         ['learningIntention', 'Show learning intention'],
         ['successCriteria', 'Show success criteria'],
         ['shortInstruction', 'Show instruction'],
         ['teacher', 'Show teacher'],
-      ].map(([key, label]) => `<div class="switch-row"><span>${label}</span><label class="switch"><input type="checkbox" data-role="architecture-header-checkbox" data-key="${key}" ${headerFields[key] !== false && (key !== 'successCriteria' || headerFields[key] === true) ? 'checked' : ''}><span></span></label></div>`).join('')}
+      ].map(([key, label]) => `<div class="switch-row"><span>${label}</span><label class="switch"><input type="checkbox" aria-label="${escapeAttr(label)}" data-role="architecture-header-checkbox" data-key="${key}" ${headerFields[key] !== false && (key !== 'successCriteria' || headerFields[key] === true) ? 'checked' : ''}><span></span></label></div>`).join('')}
     </section>
     <section class="settings-group">
       <h3>Page character</h3>
-      <div class="field"><label>Style preset</label><div class="choice-grid">${Object.entries(STYLE_PRESETS).map(([key, preset]) => `<button type="button" class="choice-button ${architecture.stylePreset === key ? 'is-selected' : ''}" data-action="apply-style-preset" data-value="${key}">${escapeHtml(preset.label)}</button>`).join('')}</div></div>
+      <div class="field"><label>Style preset</label><div class="choice-grid">${Object.entries(STYLE_PRESETS).map(([key, preset]) => `<button type="button" class="choice-button ${architecture.stylePreset === key ? 'is-selected' : ''}" data-action="apply-style-preset" data-value="${key}" aria-pressed="${architecture.stylePreset === key}">${escapeHtml(preset.label)}</button>`).join('')}</div></div>
       <div class="field"><label>Accent colour</label><div class="accent-list">${ACCENTS.map((colour) => `<button type="button" class="accent-button ${settings.accentColor === colour ? 'is-selected' : ''}" style="--swatch:${colour}" data-action="set-accent" data-value="${colour}" aria-label="Use ${colour} accent" aria-pressed="${settings.accentColor === colour}"></button>`).join('')}</div></div>
       <div class="field"><label for="colour-mode">Print colour</label><select id="colour-mode" data-role="settings-select" data-key="colorMode"><option value="colour" ${settings.colorMode === 'colour' ? 'selected' : ''}>Colour</option><option value="monochrome" ${settings.colorMode === 'monochrome' ? 'selected' : ''}>Monochrome</option></select></div>
       <div class="field"><label for="typeface">Typeface</label><select id="typeface" data-role="settings-select" data-key="typeface"><option value="system" ${settings.typeface === 'system' ? 'selected' : ''}>Classic maths</option><option value="sans" ${settings.typeface === 'sans' ? 'selected' : ''}>Clear sans</option><option value="rounded" ${settings.typeface === 'rounded' ? 'selected' : ''}>Soft rounded</option></select></div>
@@ -1320,11 +1416,11 @@ function renderSettingsContent() {
       <div class="field"><label for="composition-mode">Composition mode</label><select id="composition-mode" data-role="architecture-select" data-path="compositionMode"><option value="flow" ${architecture.compositionMode === 'flow' ? 'selected' : ''}>Flow</option><option value="rows" ${architecture.compositionMode === 'rows' ? 'selected' : ''}>Rows</option><option value="deliberate-pages" ${architecture.compositionMode === 'deliberate-pages' ? 'selected' : ''}>Deliberate pages</option></select></div>
       <div class="field"><label for="columns">Columns</label><select id="columns" data-role="settings-select" data-key="columns"><option value="1" ${settings.columns === 1 ? 'selected' : ''}>One column</option><option value="2" ${settings.columns === 2 ? 'selected' : ''}>Two columns</option></select></div>
       <div class="field"><label for="working-style">Default working style</label><select id="working-style" data-role="settings-select" data-key="workingSpaceStyle"><option value="lines" ${settings.workingSpaceStyle === 'lines' ? 'selected' : ''}>Lines</option><option value="grid" ${settings.workingSpaceStyle === 'grid' ? 'selected' : ''}>Squared</option><option value="open" ${settings.workingSpaceStyle === 'open' ? 'selected' : ''}>Open</option></select></div>
-      <div class="switch-row"><span>Question numbering</span><label class="switch"><input type="checkbox" data-role="settings-checkbox" data-key="questionNumbering" ${settings.questionNumbering ? 'checked' : ''}><span></span></label></div>
+      <div class="switch-row"><span>Question numbering</span><label class="switch"><input type="checkbox" aria-label="Question numbering" data-role="settings-checkbox" data-key="questionNumbering" ${settings.questionNumbering ? 'checked' : ''}><span></span></label></div>
       <div class="field"><label for="numbering-mode">Numbering mode</label><select id="numbering-mode" data-role="architecture-select" data-path="numbering.mode"><option value="automatic" ${architecture.numbering?.mode !== 'manual' ? 'selected' : ''}>Automatic</option><option value="manual" ${architecture.numbering?.mode === 'manual' ? 'selected' : ''}>Preserve manual numbers</option></select></div>
-      <div class="switch-row"><span>Restart numbering in sections</span><label class="switch"><input type="checkbox" data-role="architecture-numbering-checkbox" ${architecture.numbering?.restartAtSections ? 'checked' : ''}><span></span></label></div>
-      <div class="switch-row"><span>Page numbers</span><label class="switch"><input type="checkbox" data-role="settings-checkbox" data-key="pageNumbers" ${settings.pageNumbers ? 'checked' : ''}><span></span></label></div>
-      <div class="switch-row"><span>Show question marks</span><label class="switch"><input type="checkbox" data-role="settings-checkbox" data-key="showMarks" ${settings.showMarks ? 'checked' : ''}><span></span></label></div>
+      <div class="switch-row"><span>Restart numbering in sections</span><label class="switch"><input type="checkbox" aria-label="Restart numbering in sections" data-role="architecture-numbering-checkbox" ${architecture.numbering?.restartAtSections ? 'checked' : ''}><span></span></label></div>
+      <div class="switch-row"><span>Page numbers</span><label class="switch"><input type="checkbox" aria-label="Page numbers" data-role="settings-checkbox" data-key="pageNumbers" ${settings.pageNumbers ? 'checked' : ''}><span></span></label></div>
+      <div class="switch-row"><span>Show question marks</span><label class="switch"><input type="checkbox" aria-label="Show question marks" data-role="settings-checkbox" data-key="showMarks" ${settings.showMarks ? 'checked' : ''}><span></span></label></div>
       <div class="field"><label for="total-marks">Total marks <span class="field-hint">(optional)</span></label><input id="total-marks" data-role="settings-number" data-key="totalMarks" type="number" min="0" max="999" value="${settings.totalMarks ?? ''}" placeholder="Calculated by teacher"></div>
     </section>
     <section class="settings-group">
@@ -1332,10 +1428,11 @@ function renderSettingsContent() {
       <div class="field"><label for="sheet-orientation">A4 orientation</label><select id="sheet-orientation" data-role="settings-select" data-key="orientation"><option value="portrait" ${settings.orientation === 'portrait' ? 'selected' : ''}>Portrait · 210 × 297 mm</option><option value="landscape" ${settings.orientation === 'landscape' ? 'selected' : ''}>Landscape · 297 × 210 mm</option></select></div>
       <div class="field"><label for="margin-size">Print-safe margin</label><select id="margin-size" data-role="margin-preset"><option value="narrow" ${!settings.margins && settings.marginMm === 10 ? 'selected' : ''}>Narrow · 10 mm</option><option value="standard" ${!settings.margins && settings.marginMm === 12 ? 'selected' : ''}>Standard · 12 mm</option><option value="spacious" ${!settings.margins && settings.marginMm === 15 ? 'selected' : ''}>Spacious · 15 mm</option><option value="binder" ${settings.margins?.left === 18 ? 'selected' : ''}>Binder · extra left edge</option><option value="custom" ${settings.margins && settings.margins?.left !== 18 ? 'selected' : ''}>Custom safe margin</option></select></div>
       <details class="custom-margin-details"><summary>Custom safe margins</summary><div class="field-grid" style="margin-top:8px">${['top', 'right', 'bottom', 'left'].map((edge) => `<div class="field"><label for="margin-${edge}">${humanOption(edge)} mm</label><input id="margin-${edge}" type="number" min="8" max="25" data-role="custom-margin" data-edge="${edge}" value="${settings.margins?.[edge] ?? settings.marginMm}"></div>`).join('')}</div></details>
-      <div class="switch-row"><span>Show version label in footer</span><label class="switch"><input type="checkbox" data-role="footer-version-checkbox" ${architecture.footer?.fields?.includes('version-label') ? 'checked' : ''}><span></span></label></div>
+      <div class="switch-row"><span>Show version label in footer</span><label class="switch"><input type="checkbox" aria-label="Show version label in footer" data-role="footer-version-checkbox" ${architecture.footer?.fields?.includes('version-label') ? 'checked' : ''}><span></span></label></div>
       <p style="margin:0;color:var(--muted);font-size:11px;line-height:1.45">Screen preview and print use the same fixed millimetre positions. Whole question blocks always move together.</p>
     </section>
   </div>`;
+  restoreInteraction(content, interaction);
 }
 
 function versionOverrideCount(version) {
@@ -1355,7 +1452,9 @@ function renderVersionsContent() {
   const activeId = master.versions?.activeId ?? 'master';
   const compareId = versions.some((version) => version.id === ui.comparisonVersionId) ? ui.comparisonVersionId : 'master';
   const comparison = activeId === compareId ? [] : compareVersions(master, compareId, activeId).slice(0, 7);
-  versionsDialog.querySelector('#versions-content').innerHTML = `<div class="version-quick-actions">
+  const content = versionsDialog.querySelector('#versions-content');
+  const interaction = captureInteraction(content);
+  content.innerHTML = `<div class="version-quick-actions">
     ${[
       ['supported', 'Create supported version'],
       ['assessment', 'Create assessment version'],
@@ -1376,6 +1475,7 @@ function renderVersionsContent() {
     <div class="field"><label for="version-compare">Compare active version with</label><select id="version-compare" data-role="version-compare">${versions.map((version) => `<option value="${version.id}" ${version.id === compareId ? 'selected' : ''}>${escapeHtml(version.name)}</option>`).join('')}</select></div>
     ${comparison.length ? `<div class="version-difference-list">${comparison.map((item) => `<div><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.differences.join(' · '))}</span></div>`).join('')}</div>` : '<p class="version-quiet">No differences to show against this version.</p>'}
   </section>` : '<p class="version-quiet">Create a version only when it gives pupils a genuinely different route into the same mathematics.</p>'}`;
+  restoreInteraction(content, interaction);
 }
 
 function renderProjectList() {
@@ -1424,16 +1524,68 @@ function scalePages() {
 }
 
 function render() {
+  renderTicket += 1;
+  const previousStage = renderedStage;
+  const preserveInteraction = previousStage === ui.stage;
+  const interaction = preserveInteraction ? captureInteraction(root) : null;
   writeStage(ui.stage);
   updateHeader();
   if (ui.stage === 'check') root.innerHTML = renderCheck();
   else if (ui.stage === 'make') root.innerHTML = renderMake();
   else if (ui.stage === 'print') root.innerHTML = renderPrint();
   else root.innerHTML = renderPaste();
-  requestAnimationFrame(scalePages);
+  renderedStage = ui.stage;
+  requestAnimationFrame(() => {
+    scalePages();
+    if (preserveInteraction) restoreInteraction(root, interaction);
+    else if (previousStage != null && !document.querySelector('dialog[open]')) {
+      root.setAttribute('tabindex', '-1');
+      root.focus({ preventScroll: true });
+    }
+  });
+}
+
+function scheduleRender() {
+  const ticket = ++renderTicket;
+  queueMicrotask(() => {
+    if (ticket === renderTicket) render();
+  });
+}
+
+const MOBILE_PANEL_CONFIG = {
+  navigator: { id: 'mobile-question-navigator', triggerAction: 'open-navigator' },
+  inspector: { id: 'question-inspector', triggerAction: 'open-inspector' },
+};
+
+function focusAfterRender(selector) {
+  requestAnimationFrame(() => {
+    const target = root.querySelector(selector);
+    if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+  });
+}
+
+function openMobilePanel(panelName) {
+  const config = MOBILE_PANEL_CONFIG[panelName];
+  if (!config) return;
+  mobilePanelReturnAction = config.triggerAction;
+  ui.navigatorOpen = panelName === 'navigator';
+  ui.inspectorOpen = panelName === 'inspector';
+  render();
+  focusAfterRender(`#${CSS.escape(config.id)}`);
+}
+
+function closeMobilePanels() {
+  const returnAction = mobilePanelReturnAction
+    ?? (ui.navigatorOpen ? MOBILE_PANEL_CONFIG.navigator.triggerAction : MOBILE_PANEL_CONFIG.inspector.triggerAction);
+  ui.inspectorOpen = false;
+  ui.navigatorOpen = false;
+  mobilePanelReturnAction = null;
+  render();
+  focusAfterRender(`[data-action="${CSS.escape(returnAction)}"]`);
 }
 
 function goStage(stage) {
+  if (stage === 'print') preparePrintState();
   const worksheet = store.getState();
   if (stage === 'check') {
     if (worksheet.originalImport.rawText && worksheet.blocks.length) {
@@ -1476,8 +1628,8 @@ function addCustomSection() {
     response: { type: 'none', size: 'compact' },
     layout: { size: 'compact', keepWithNext: true },
   });
-  store.dispatch(worksheetActions.addBlock(heading));
-  store.dispatch(worksheetActions.updateArchitecture({
+  const architecture = {
+    ...worksheet.architecture,
     sections: [...(worksheet.architecture?.sections ?? []), {
       id,
       headingId: id,
@@ -1488,7 +1640,8 @@ function addCustomSection() {
       restartNumbering: false,
       style: 'inherit',
     }],
-  }));
+  };
+  store.dispatch(worksheetActions.replaceStructure([...worksheet.blocks, heading], architecture));
   ui.selectedId = id;
   toast('New section added at the end of the worksheet.');
 }
@@ -1509,8 +1662,7 @@ function moveSection(sectionId, direction) {
     if (group) group.push(block); else unassigned.push(block);
   }
   const blocks = [...unassigned, ...reorderedSections.flatMap((item) => grouped.get(item.id))];
-  store.dispatch(worksheetActions.replaceBlocks(blocks));
-  store.dispatch(worksheetActions.updateArchitecture({ sections: reorderedSections }));
+  store.dispatch(worksheetActions.replaceStructure(blocks, { ...worksheet.architecture, sections: reorderedSections }));
 }
 
 async function removeSection(sectionId) {
@@ -1525,8 +1677,10 @@ async function removeSection(sectionId) {
   const blocks = worksheet.blocks
     .filter((block) => block.id !== section.headingId)
     .map((block) => block.section === sectionId ? { ...block, section: destination } : block);
-  store.dispatch(worksheetActions.replaceBlocks(blocks));
-  store.dispatch(worksheetActions.updateArchitecture({ sections: sections.filter((item) => item.id !== sectionId) }));
+  store.dispatch(worksheetActions.replaceStructure(blocks, {
+    ...worksheet.architecture,
+    sections: sections.filter((item) => item.id !== sectionId),
+  }));
   ui.selectedId = blocks.find((block) => block.kind === 'question')?.id ?? null;
 }
 
@@ -1649,6 +1803,7 @@ function applySafeNumberVariation() {
 // change event. This keeps notes as reliable as the other composition controls
 // without adding a history entry for every keystroke.
 let teacherFieldSaveTimer = null;
+let pendingTeacherFieldSave = null;
 
 function teacherFieldDetails(target) {
   if (target.matches('[data-role="teacher-answer"]')) return { key: 'answer', value: target.value || null };
@@ -1667,7 +1822,25 @@ function persistTeacherField(block, details) {
 }
 
 function saveTeacherFieldFromTarget(target, worksheet = store.getState(), block = selectedBlock(worksheet)) {
-  return persistTeacherField(block, teacherFieldDetails(target));
+  const details = teacherFieldDetails(target);
+  if (pendingTeacherFieldSave?.blockId === block?.id && pendingTeacherFieldSave.details?.key === details?.key) {
+    clearTimeout(teacherFieldSaveTimer);
+    teacherFieldSaveTimer = null;
+    pendingTeacherFieldSave = null;
+  }
+  return persistTeacherField(block, details);
+}
+
+function persistPendingTeacherField() {
+  if (teacherFieldSaveTimer != null) {
+    clearTimeout(teacherFieldSaveTimer);
+    teacherFieldSaveTimer = null;
+  }
+  const pending = pendingTeacherFieldSave;
+  pendingTeacherFieldSave = null;
+  if (!pending || (masterWorksheet().versions?.activeId ?? 'master') !== pending.versionId) return false;
+  const active = store.getState().blocks.find((item) => item.id === pending.blockId);
+  return persistTeacherField(active, pending.details);
 }
 
 function queueTeacherFieldSave(target) {
@@ -1675,13 +1848,28 @@ function queueTeacherFieldSave(target) {
   const worksheet = store.getState();
   const block = selectedBlock(worksheet);
   if (!details || !block) return;
-  const versionId = masterWorksheet().versions?.activeId ?? 'master';
+  pendingTeacherFieldSave = {
+    blockId: block.id,
+    versionId: masterWorksheet().versions?.activeId ?? 'master',
+    details,
+  };
   clearTimeout(teacherFieldSaveTimer);
-  teacherFieldSaveTimer = setTimeout(() => {
-    if ((masterWorksheet().versions?.activeId ?? 'master') !== versionId) return;
-    const active = store.getState().blocks.find((item) => item.id === block.id);
-    persistTeacherField(active, details);
-  }, 180);
+  teacherFieldSaveTimer = setTimeout(persistPendingTeacherField, 180);
+}
+
+function preparePrintState() {
+  const target = document.activeElement;
+  const details = target instanceof HTMLElement ? teacherFieldDetails(target) : null;
+  const block = details ? selectedBlock(store.getState()) : null;
+  if (details && block) {
+    pendingTeacherFieldSave = {
+      blockId: block.id,
+      versionId: masterWorksheet().versions?.activeId ?? 'master',
+      details,
+    };
+  }
+  persistPendingTeacherField();
+  store.flush();
 }
 
 function attachModel(family) {
@@ -1878,13 +2066,15 @@ document.addEventListener('change', (event) => {
   } else if (target.matches('[data-role="response-custom-rows"]') && block) {
     store.dispatch(worksheetActions.setResponse(block.id, { ...block.response, customRows: Number(target.value) || 0, suggested: false, teacherChosen: true }));
   } else if (target.matches('[data-role="block-pattern"]') && block) {
-    store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, pattern: target.value, teacherChosen: true } }));
+    const footprint = footprintForPattern(target.value, block);
+    store.dispatch(worksheetActions.updateBlock(block.id, {
+      composition: { ...block.composition, pattern: target.value, footprint, teacherChosen: true },
+      layout: { ...block.layout, columnSpan: footprint === 'full' || footprint === 'page' ? 'full' : footprint === 'half' ? 'half' : 'auto' },
+    }));
   } else if (target.matches('[data-role="manual-number"]') && block) {
     store.dispatch(worksheetActions.updateBlock(block.id, { manualNumber: target.value.trim() || null }));
   } else if (target.matches('[data-role="block-section"]') && block) {
     store.dispatch(worksheetActions.updateBlock(block.id, { section: target.value }));
-  } else if (target.matches('[data-role="keep-together"]') && block) {
-    store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, keepTogether: target.checked } }));
   } else if (target.matches('[data-role="keep-with-next"]') && block) {
     store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, keepWithNext: target.checked }, layout: { ...block.layout, keepWithNext: target.checked } }));
   } else if (target.matches('[data-role="block-composition-text"]') && block) {
@@ -1893,8 +2083,10 @@ document.addEventListener('change', (event) => {
     store.dispatch(worksheetActions.updateBlock(block.id, { composition: { ...block.composition, [key]: value } }));
   } else if (target.matches('[data-role="section-role"]') && block?.kind === 'heading') {
     const sections = (worksheet.architecture?.sections ?? []).map((section) => section.id === block.section ? { ...section, role: target.value } : section);
-    store.dispatch(worksheetActions.updateBlock(block.id, { sectionMeta: { ...block.sectionMeta, role: target.value, teacherChosen: true } }));
-    store.dispatch(worksheetActions.updateArchitecture({ sections }));
+    const blocks = worksheet.blocks.map((item) => item.id === block.id
+      ? { ...item, sectionMeta: { ...item.sectionMeta, role: target.value, teacherChosen: true } }
+      : item);
+    store.dispatch(worksheetActions.replaceStructure(blocks, { ...worksheet.architecture, sections }));
   } else if (target.matches('[data-role="section-layout"]') && block?.kind === 'heading') {
     const sections = (worksheet.architecture?.sections ?? []).map((section) => section.id === block.section ? { ...section, layout: target.value } : section);
     const compositionMode = sections.some((section) => section.layout === 'rows')
@@ -1981,8 +2173,8 @@ document.addEventListener('click', async (event) => {
     if (worksheetBlock) {
       ui.selectedId = worksheetBlock.dataset.blockId;
       ui.browseModels = false;
-      if (matchMedia('(max-width: 760px)').matches) ui.inspectorOpen = true;
-      render();
+      if (matchMedia('(max-width: 980px)').matches) openMobilePanel('inspector');
+      else render();
     }
     return;
   }
@@ -2042,8 +2234,8 @@ document.addEventListener('click', async (event) => {
   else if (action === 'select-block') {
     ui.selectedId = id;
     ui.browseModels = false;
-    if (matchMedia('(max-width: 760px)').matches) ui.inspectorOpen = true;
-    render();
+    if (matchMedia('(max-width: 980px)').matches) openMobilePanel('inspector');
+    else render();
   } else if (action === 'set-output-view') {
     store.dispatch(worksheetActions.setOutputView(button.dataset.value));
   } else if (action === 'open-settings') {
@@ -2148,34 +2340,25 @@ document.addEventListener('click', async (event) => {
     }
   } else if (action === 'add-section') {
     addCustomSection();
-    render();
   } else if (action === 'move-section') {
     moveSection(id, button.dataset.direction);
-    render();
   } else if (action === 'remove-section') {
     await removeSection(id);
-    render();
   } else if (action === 'vary-numbers') {
     applySafeNumberVariation();
   } else if (action === 'jump-page') {
     const page = document.querySelector(`.a4-shell [data-page-number="${CSS.escape(button.dataset.page)}"]`);
     page?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
   } else if (action === 'open-navigator') {
-    ui.navigatorOpen = true;
-    ui.inspectorOpen = false;
-    render();
+    openMobilePanel('navigator');
   } else if (action === 'open-inspector') {
-    ui.inspectorOpen = true;
-    ui.navigatorOpen = false;
-    render();
+    openMobilePanel('inspector');
   } else if (action === 'close-mobile-panels') {
-    ui.inspectorOpen = false;
-    ui.navigatorOpen = false;
-    render();
+    closeMobilePanels();
   } else if (action === 'go-stage') goStage(button.dataset.stage);
   else if (action === 'apply-print-repair') applySafePrintRepair();
   else if (action === 'print-now') {
-    store.flush();
+    preparePrintState();
     requestAnimationFrame(() => window.print());
   } else if (action === 'load-project') {
     if (store.load(id)) {
@@ -2183,18 +2366,21 @@ document.addEventListener('click', async (event) => {
       ui.selectedId = store.getState().blocks.find((block) => block.kind === 'question')?.id ?? null;
       projectDialog.close();
       toast('Worksheet reopened.');
-    }
+    } else toast('This saved worksheet could not be opened. Your current worksheet is unchanged.', 'warning');
   } else if (action === 'duplicate-project') {
     const copy = duplicateStoredProject(id, { name: `${button.closest('.project-row')?.querySelector('strong')?.textContent ?? 'Worksheet'} copy` });
     if (copy) {
       renderProjectList();
       toast('Worksheet duplicated.');
-    }
+    } else toast('The worksheet could not be duplicated on this device.', 'warning');
   } else if (action === 'delete-project') {
     const isCurrent = id === store.getState().metadata.id;
     const confirmed = await askConfirm({ title: 'Delete this saved worksheet?', message: 'This removes the device copy and cannot be undone.', actionLabel: 'Delete worksheet' });
     if (!confirmed) return;
-    deleteProject(id);
+    if (!deleteProject(id)) {
+      toast('The saved worksheet could not be deleted. It remains on this device.', 'warning');
+      return;
+    }
     if (isCurrent) {
       store.newProject();
       ui.stage = 'paste';
@@ -2331,16 +2517,30 @@ document.querySelector('#redo-button').addEventListener('click', () => store.red
 document.querySelector('#header-print-button').addEventListener('click', () => goStage('print'));
 
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape'
+    && matchMedia('(max-width: 980px)').matches
+    && !document.querySelector('dialog[open]')
+    && (ui.inspectorOpen || ui.navigatorOpen)) {
+    event.preventDefault();
+    closeMobilePanels();
+    return;
+  }
   const modifier = event.metaKey || event.ctrlKey;
   if (!modifier) return;
-  if (event.key.toLowerCase() === 'z') {
+  const key = event.key.toLowerCase();
+  const target = event.target;
+  const editable = target instanceof HTMLElement
+    && (target.matches('input, textarea, select, [contenteditable="true"]') || target.isContentEditable);
+  if (editable && (key === 'z' || key === 'y')) return;
+  if (key === 'z') {
     event.preventDefault();
     if (event.shiftKey) store.redo(); else store.undo();
-  } else if (event.key.toLowerCase() === 'y') {
+  } else if (key === 'y') {
     event.preventDefault();
     store.redo();
-  } else if (event.key.toLowerCase() === 'p' && store.getState().blocks.some((block) => block.kind === 'question')) {
+  } else if (key === 'p' && store.getState().blocks.some((block) => block.kind === 'question')) {
     event.preventDefault();
+    preparePrintState();
     ui.stage = 'print';
     render();
     setTimeout(() => window.print(), 80);
@@ -2348,10 +2548,24 @@ document.addEventListener('keydown', (event) => {
 });
 
 window.addEventListener('resize', () => requestAnimationFrame(scalePages));
+window.addEventListener('beforeprint', () => {
+  preparePrintState();
+  if (ui.stage === 'make' || ui.stage === 'print') render();
+});
 window.addEventListener('beforeunload', () => store.flush());
 
-store.subscribe(() => render());
+store.subscribe((_state, meta) => {
+  const reason = typeof meta === 'string' ? meta : meta?.reason;
+  if (reason === 'persistence') {
+    updateSaveState();
+    return;
+  }
+  scheduleRender();
+});
 render();
+if (recoveryNeeded) {
+  queueMicrotask(() => toast('A saved worksheet could not be opened safely. A blank worksheet was started; the saved device copy was left untouched.', 'warning'));
+}
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(() => {}));

@@ -232,7 +232,7 @@ function compatibilityFor(family, info) {
     case 'base-ten':
       return positives.some((value) => value <= 9999)
         ? { compatible: true }
-        : { compatible: false, reason: 'Build 1 base-ten blocks support positive whole numbers up to 9,999.' };
+        : { compatible: false, reason: 'Base-ten blocks support positive whole numbers up to 9,999.' };
     case 'partition':
       return integers.some((value) => value >= 0)
         ? { compatible: true }
@@ -923,7 +923,7 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
 
   const provisionalRecipe = safeHighMatch ? top.recipe : null;
   const noModelRecommended = !top || confidence === 'low' || info.hasExistingRepresentation;
-  if (!top) warnings.push('No Build 1 model can be matched reliably; leaving the question unmodelled is safest.');
+  if (!top) warnings.push('No model can be matched reliably; leaving the question unmodelled is safest.');
 
   return {
     confidence,

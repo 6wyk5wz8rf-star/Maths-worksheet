@@ -195,6 +195,9 @@ const MODEL_FAMILY_ALIASES = Object.freeze({
 });
 
 const ROUNDING_MAGNITUDES = Object.freeze({
+  10: 10,
+  100: 100,
+  1000: 1000,
   ten: 10,
   tens: 10,
   hundred: 100,
@@ -316,9 +319,15 @@ export function formatPence(value) {
 
 export function parseTimeToMinutes(value) {
   if (value && typeof value === 'object' && Number.isInteger(value.hours) && Number.isInteger(value.minutes)) {
-    return value.hours >= 0 && value.hours <= 23 && value.minutes >= 0 && value.minutes < 60
-      ? (value.hours * 60) + value.minutes
-      : null;
+    const meridiem = typeof value.meridiem === 'string' ? value.meridiem.toLowerCase() : null;
+    let hours = Number.isInteger(value.sourceHours) ? value.sourceHours : value.hours;
+    if (value.minutes < 0 || value.minutes >= 60) return null;
+    if (meridiem) {
+      if (!['am', 'pm'].includes(meridiem) || hours < 1 || hours > 12) return null;
+      if (meridiem === 'pm' && hours !== 12) hours += 12;
+      if (meridiem === 'am' && hours === 12) hours = 0;
+    } else if (hours < 0 || hours > 23) return null;
+    return (hours * 60) + value.minutes;
   }
   const match = String(value ?? '').trim().match(/^(\d{1,2}):(\d{2})(?:\s*(am|pm))?$/i);
   if (!match) return null;
@@ -522,6 +531,7 @@ function detectDomains(info, source, equation = null) {
   const lower = source.toLowerCase();
   const scores = new Map();
   const has = (pattern) => pattern.test(lower);
+  const timesTable = has(/\b(?:\d+\s+)?times\s+tables?\b/);
   if (has(/\b(?:place value|digit|thousands?|hundreds?|tens?|ones?|partition|expanded form|roman numeral|negative number)\b/)) addScore(scores, 'Number and place value', 8);
   if (has(/\b(?:round|nearest|order|compare|greater than|less than)\b/)) addScore(scores, 'Number and place value', 4);
   if (info.operations.includes('addition') || has(/\b(?:add|sum|altogether|combined)\b/)) addScore(scores, 'Addition', 7);
@@ -537,12 +547,12 @@ function detectDomains(info, source, equation = null) {
   if (equation?.operator === 'division') addScore(scores, 'Division', 9);
   if (info.fractions.length || fractionFromWords(lower) || has(/\b(?:fraction|numerator|denominator|equivalent|halves|quarters|fifths|tenths)\b/)) addScore(scores, 'Fractions', 9);
   if (has(/\b(?:decimal|tenths|hundredths)\b/) || info.numbers?.some((number) => number.decimal)) addScore(scores, 'Decimals', 7);
-  if (has(/[£]|\b(?:pence|pounds?|change|coins?|notes?)\b/)) addScore(scores, 'Money', 10);
+  if (has(/[£]|\b(?:pence|pounds?|coins?)\b/)) addScore(scores, 'Money', 10);
   if (has(/\b(?:perimeter|boundary)\b/)) addScore(scores, 'Perimeter', 12);
   if (has(/\b(?:area|square centimetres?|cm²|square units?)\b/)) addScore(scores, 'Area', 12);
   if (has(/\b(?:angle|triangle|quadrilateral|polygon|parallel|perpendicular|symmetry|reflect)\b/)) addScore(scores, 'Geometry', 10);
   if (has(/\b(?:coordinate|axis|axes|clockwise|anticlockwise|turn)\b/)) addScore(scores, 'Position and direction', 10);
-  if (has(/\b(?:chart|graph|pictogram|frequency|tally|table|data)\b/)) addScore(scores, 'Statistics', 10);
+  if (has(/\b(?:chart|graph|pictogram|frequency|tally|data)\b/) || (!timesTable && has(/\btables?\b/))) addScore(scores, 'Statistics', 10);
   // A single explicit time is enough for a clock-drawing task.  Requiring two
   // times here would leave "Draw the hands to show 14:35" without a Time
   // domain or a safe blank clock.
@@ -611,8 +621,9 @@ function inferRepresentationPurpose(family, source, info) {
 }
 
 function nearestMagnitude(source) {
-  const match = source.match(/\bnearest\s+(10|100|1000|ten|tens|hundred|hundreds|thousand|thousands)\b/i);
-  return match ? ROUNDING_MAGNITUDES[match[1].toLowerCase()] ?? null : null;
+  const match = source.match(/\bnearest\s+(10|100|1,?000|ten|tens|hundred|hundreds|thousand|thousands)\b/i);
+  const key = match?.[1].toLowerCase().replace(/,/g, '');
+  return key ? ROUNDING_MAGNITUDES[key] ?? null : null;
 }
 
 function deriveWordStructure(info, source, family, equation) {
@@ -679,10 +690,22 @@ function deriveWordStructure(info, source, family, equation) {
   // correction away from comparison stops source wording such as “fewer”
   // from forcing comparison bars back onto the block.
   if ((comparisonWords && family === 'compare') || (family === 'compare' && values.length >= 2)) {
-    const fewerStatement = new RegExp(`\\b(?:has|have|is)\\s+${NUMBER_SOURCE}\\s+(?:fewer|less)\\b`, 'i').test(lower);
+    const fewerPattern = new RegExp(`\\b(?:has|have|is)\\s+(${NUMBER_SOURCE})\\b\\s+(?:fewer|less)\\b`, 'i');
+    const fewerStatement = lower.match(fewerPattern);
     if (fewerStatement) {
-      result.comparison = { greater: first, lesser: null, difference: second, type: 'reduction-or-comparison' };
-      result.difference = second;
+      const difference = cleanNumber(fewerStatement[1]);
+      // Resolve the known comparison quantity from its own clause rather than
+      // trusting numeric source order. This handles both “Ben has 42. Amy has
+      // 17 fewer” and “Amy has 17 fewer ... Ben has 42” identically.
+      const knownPattern = new RegExp(`\\b(?:has|have|is)\\s+(${NUMBER_SOURCE})\\b(?!\\s+(?:fewer|less)\\b)`, 'gi');
+      const knownQuantities = [...lower.matchAll(knownPattern)]
+        .map((match) => cleanNumber(match[1]))
+        .filter((value) => Number.isFinite(value));
+      const greater = knownQuantities[0]
+        ?? values.find((value) => value !== difference)
+        ?? null;
+      result.comparison = { greater, lesser: null, difference, type: 'reduction-or-comparison' };
+      result.difference = difference;
       result.unknownPosition ??= 'smaller-quantity';
     } else {
       const greater = Math.max(first, second);

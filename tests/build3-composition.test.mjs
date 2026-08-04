@@ -102,6 +102,23 @@ test('short direct fluency questions receive compact half-width answer space whi
   assert.equal(method.response.type, 'calculation-area');
 });
 
+test('a pupil response model is the response route and does not receive a duplicate working box', () => {
+  const source = question('plot', 'Plot the point (4, 6) on the coordinate grid.', {
+    model: createModelRecipe('number-line', {
+      purpose: 'response-model',
+      completionState: 'blank',
+    }),
+    response: { type: 'open-box', size: 'standard' },
+  });
+  const suggested = suggestWorksheetArchitecture([source], {
+    purpose: 'practice',
+    idFactory: ids,
+    forceSuggestions: true,
+  });
+
+  assert.equal(suggested.blocks.find((block) => block.id === 'plot').response.type, 'none');
+});
+
 test('Build 2 projects migrate into a structured Build 3 master without losing models or raw question data', () => {
   const migrated = migrateWorksheet({
     version: 2,
@@ -196,6 +213,135 @@ test('rows composition pairs only deliberate half-width questions and safely fit
   assert.equal(c.yMm, d.yMm);
   assert.ok(c.yMm >= reason.yMm + reason.heightMm);
   assert.equal(result.hasOverflow, false);
+});
+
+test('rows composition honours a section that explicitly flows at full width', () => {
+  const half = (id) => question(id, '6 × 8 =', {
+    section: 'reasoning',
+    composition: { footprint: 'half' },
+    layout: { columnSpan: 'half' },
+  });
+  const state = worksheet([half('flow-a'), half('flow-b')], {
+    architecture: {
+      compositionMode: 'rows',
+      sections: [{ id: 'reasoning', name: 'Reasoning', role: 'reasoning', layout: 'flow' }],
+    },
+  });
+  const result = paginateWorksheet(state);
+
+  assert.notEqual(result.placements['flow-a'].yMm, result.placements['flow-b'].yMm);
+  assert.equal(result.placements['flow-a'].widthMm, result.geometry.contentWidthMm);
+  assert.equal(result.placements['flow-b'].widthMm, result.geometry.contentWidthMm);
+});
+
+test('flow composition honours a section that explicitly uses paired rows', () => {
+  const half = (id) => question(id, '7 × 6 =', {
+    section: 'fluency',
+    composition: { footprint: 'half' },
+    layout: { columnSpan: 'half' },
+  });
+  const reasoning = question('reasoning-full', 'Explain why the method works.', {
+    section: 'reasoning',
+    composition: { footprint: 'spacious' },
+    layout: { columnSpan: 'full' },
+  });
+  const state = worksheet([half('row-a'), half('row-b'), reasoning], {
+    architecture: {
+      compositionMode: 'flow',
+      sections: [
+        { id: 'fluency', name: 'Fluency', role: 'fluency', layout: 'rows' },
+        { id: 'reasoning', name: 'Reasoning', role: 'reasoning', layout: 'flow' },
+      ],
+    },
+  });
+  const result = paginateWorksheet(state);
+
+  assert.equal(result.geometry.columns, 2);
+  assert.equal(result.placements['row-a'].yMm, result.placements['row-b'].yMm);
+  assert.deepEqual([result.placements['row-a'].column, result.placements['row-b'].column], [0, 1]);
+  assert.equal(result.placements['reasoning-full'].widthMm, result.geometry.contentWidthMm);
+  assert.ok(result.placements['reasoning-full'].yMm > result.placements['row-a'].yMm);
+});
+
+test('deliberate pages retain flowing placement instead of implicitly becoming two-column rows', () => {
+  const half = (id) => question(id, '7 × 6 =', {
+    section: 'fluency',
+    composition: { footprint: 'half' },
+    layout: { columnSpan: 'half' },
+  });
+  const state = worksheet([half('deliberate-a'), half('deliberate-b')], {
+    architecture: {
+      compositionMode: 'deliberate-pages',
+      sections: [{ id: 'fluency', name: 'Fluency', role: 'fluency', layout: 'rows' }],
+    },
+  });
+  const result = paginateWorksheet(state);
+
+  assert.equal(result.geometry.columns, 1);
+  assert.notEqual(result.placements['deliberate-a'].yMm, result.placements['deliberate-b'].yMm);
+});
+
+test('start section on a new page applies once to its heading rather than every section block', () => {
+  const intro = question('intro-question', '4 + 5 =', { section: 'intro' });
+  const heading = createQuestionBlock({
+    id: 'new-section', kind: 'heading', originalText: 'Reasoning', displayText: 'Reasoning',
+    section: 'new-section', layout: { keepWithNext: true },
+  });
+  const first = question('new-first', 'Explain why 4 + 5 = 9.', { section: 'new-section' });
+  const second = question('new-second', 'Show another way to make 9.', { section: 'new-section' });
+  const state = worksheet([intro, heading, first, second], {
+    architecture: {
+      compositionMode: 'flow',
+      sections: [
+        { id: 'intro', name: 'Fluency', role: 'fluency', layout: 'flow' },
+        { id: 'new-section', headingId: 'new-section', name: 'Reasoning', role: 'reasoning', layout: 'flow', startOnNewPage: true },
+      ],
+    },
+  });
+  const result = paginateWorksheet(state);
+
+  assert.equal(result.placements['intro-question'].page, 1);
+  assert.equal(result.placements['new-section'].page, 2);
+  assert.equal(result.placements['new-first'].page, 2);
+  assert.equal(result.placements['new-second'].page, 2);
+});
+
+test('block footprints change printable height and a safe full-page block owns exactly one page', () => {
+  const sized = (id, footprint) => question(id, 'What is 8 × 7?', {
+    composition: { footprint },
+    response: { type: 'short-answer', size: 'small' },
+  });
+  const compact = paginateWorksheet(worksheet([sized('compact', 'compact')])).placements.compact;
+  const standard = paginateWorksheet(worksheet([sized('standard', 'standard')])).placements.standard;
+  const spacious = paginateWorksheet(worksheet([sized('spacious', 'spacious')])).placements.spacious;
+  assert.ok(compact.heightMm < standard.heightMm);
+  assert.ok(standard.heightMm < spacious.heightMm);
+
+  const fullPage = sized('full-page', 'page');
+  const result = paginateWorksheet(worksheet([
+    sized('before-page', 'standard'),
+    fullPage,
+  ]));
+  const placement = result.placements['full-page'];
+  const page = result.pages[placement.page - 1];
+  assert.equal(result.pageCount, 2, 'a final full-page block must not create a trailing phantom page');
+  assert.deepEqual(page.items.map((item) => item.blockId), ['full-page']);
+  assert.equal(placement.heightMm, Math.round((page.bodyBottomMm - placement.yMm) * 100) / 100);
+  assert.equal(result.hasOverflow, false);
+});
+
+test('fourteen-row table and labelled-step spaces reserve every fixed-height print row', () => {
+  for (const type of ['table-completion', 'labelled-steps']) {
+    const block = question(`rows-${type}`, 'Complete every row.', {
+      response: { type, size: 'standard', rows: 14 },
+    });
+    const state = worksheet([block], { settings: { density: 'compact' } });
+    const result = paginateWorksheet(state);
+    const responseMm = result.placements[block.id].measurement.breakdown.responseMm;
+
+    assert.equal(responseMm, 98, `${type} needs 14 × 7 mm even at compact density`);
+    assert.equal(result.hasOverflow, false);
+  }
 });
 
 test('manual numbering accepts nested labels and answer output gets its own print-safe measurement', () => {

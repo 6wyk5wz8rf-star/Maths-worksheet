@@ -33,6 +33,16 @@ function withoutReleaseQuery(path) {
   return path.split(/[?#]/, 1)[0];
 }
 
+function cachePathForImport(sourcePath, specifier) {
+  const queryIndex = specifier.search(/[?#]/);
+  const suffix = queryIndex >= 0 ? specifier.slice(queryIndex) : '';
+  const modulePath = queryIndex >= 0 ? specifier.slice(0, queryIndex) : specifier;
+  const absoluteModulePath = resolve(dirname(resolve(rootDirectory, sourcePath)), modulePath);
+  const projectRelativePath = relative(rootDirectory, absoluteModulePath).replaceAll('\\', '/');
+  assert.ok(!projectRelativePath.startsWith('../'), `Local module ${specifier} must remain inside the project.`);
+  return `./${projectRelativePath}${suffix}`;
+}
+
 async function moduleDependencyPaths(entryPath) {
   const pending = [entryPath];
   const visited = new Set();
@@ -55,33 +65,46 @@ async function moduleDependencyPaths(entryPath) {
   return visited;
 }
 
-test('Build 3 uses a fresh, explicit cache namespace', async () => {
+test('release v1 uses a product-scoped cache namespace', async () => {
   const worker = await readProjectFile('service-worker.js');
-  assert.match(worker, /const CACHE = 'maths-page-studio-build-3-v\d+';/);
-  assert.match(worker, /self\.skipWaiting\(\)/);
-  assert.match(worker, /self\.clients\.claim\(\)/);
+  assert.match(worker, /const CACHE_PREFIX = 'maths-page-studio-';/);
+  assert.match(worker, /const CACHE = `\$\{CACHE_PREFIX\}release-v1`;/);
+  assert.match(worker, /await self\.skipWaiting\(\)/);
+  assert.match(worker, /await self\.clients\.claim\(\)/);
+  assert.match(worker, /key\.startsWith\(CACHE_PREFIX\) && key !== CACHE/);
+  assert.doesNotMatch(worker, /filter\(\(key\) => key !== CACHE\)/, 'Activation must not delete unrelated origin caches.');
 });
 
-test('Build 3 release-addresses its changed module graph so an existing installed shell updates cleanly', async () => {
+test('release v1 addresses the complete changed module graph', async () => {
   const [html, app, state, worker] = await Promise.all([
     readProjectFile('index.html'),
     readProjectFile('js/app.js'),
     readProjectFile('js/state.js'),
     readProjectFile('service-worker.js'),
   ]);
-  const release = 'build3-v4';
+  const release = 'release-v1';
   assert.match(html, new RegExp(`\\./js/app\\.js\\?v=${release}`));
-  for (const source of [app, state]) assert.match(source, new RegExp(`\\?v=${release}`));
-  for (const path of [
-    './js/app.js',
-    './js/state.js',
-    './js/pagination.js',
-    './js/worksheet-architecture.js',
-    './js/worksheet-versions.js',
-    './js/number-variation.js',
-  ]) {
-    assert.match(worker, new RegExp(`${path.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\?v=${release}`));
+  assert.match(worker, new RegExp(`\\./js/app\\.js\\?v=${release}`));
+
+  assert.match(app, new RegExp(`\\?v=${release}`), 'The release entry module must address its changed dependencies.');
+  const cached = new Set(cacheEntries(worker));
+  for (const [sourcePath, source] of [['js/app.js', app], ['js/state.js', state]]) {
+    for (const specifier of localImportSpecifiers(source).filter((path) => /[?#]/.test(path))) {
+      const cachePath = cachePathForImport(sourcePath, specifier);
+      assert.ok(cached.has(cachePath), `${cachePath} must be pre-cached because ${sourcePath} imports it.`);
+    }
   }
+});
+
+test('runtime cache writes are awaited and document fallback is navigation-only', async () => {
+  const worker = await readProjectFile('service-worker.js');
+  assert.match(worker, /await cache\.addAll\(SHELL\)/);
+  assert.match(worker, /await cache\.put\(event\.request, response\.clone\(\)\)/);
+  assert.match(worker, /if \(event\.request\.mode === 'navigate'\)/);
+  assert.match(worker, /return Response\.error\(\)/);
+  const navigationCheck = worker.indexOf("event.request.mode === 'navigate'");
+  const documentFallback = worker.indexOf('caches.match(OFFLINE_DOCUMENT)');
+  assert.ok(navigationCheck >= 0 && documentFallback > navigationCheck, 'The HTML fallback must be reached only inside navigation handling.');
 });
 
 test('the offline shell pre-caches every statically imported local application module', async () => {

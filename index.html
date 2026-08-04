@@ -42,7 +42,7 @@
         <button type="button" class="icon-button" id="redo-button" aria-label="Redo" title="Redo" disabled>
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 8 5 4-5 4"/><path d="M19 12h-8a6 6 0 0 0-6 6"/></svg>
         </button>
-        <button type="button" class="primary compact" id="header-print-button">
+        <button type="button" class="primary compact" id="header-print-button" aria-label="Print worksheet">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 9V3h10v6M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M7 14h10v7H7z"/></svg>
           <span>Print</span>
         </button>
@@ -53,7 +53,7 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <dialog id="confirm-dialog" class="modal confirm-modal">
+    <dialog id="confirm-dialog" class="modal confirm-modal" aria-labelledby="confirm-title" aria-describedby="confirm-message">
       <form method="dialog">
         <span class="modal-symbol" aria-hidden="true">?</span>
         <h2 id="confirm-title">Are you sure?</h2>
@@ -65,12 +65,12 @@
       </form>
     </dialog>
 
-    <dialog id="project-dialog" class="modal project-modal">
+    <dialog id="project-dialog" class="modal project-modal" aria-labelledby="project-dialog-title">
       <form method="dialog">
         <div class="modal-heading">
           <div>
             <span class="eyebrow">On this device</span>
-            <h2>Your worksheets</h2>
+            <h2 id="project-dialog-title">Your worksheets</h2>
           </div>
           <button value="cancel" class="close-button" aria-label="Close saved worksheets">×</button>
         </div>
@@ -81,12 +81,12 @@
       </form>
     </dialog>
 
-    <dialog id="settings-dialog" class="modal settings-modal">
+    <dialog id="settings-dialog" class="modal settings-modal" aria-labelledby="settings-dialog-title">
       <form method="dialog">
         <div class="modal-heading">
           <div>
             <span class="eyebrow">Whole sheet</span>
-            <h2>Page settings</h2>
+            <h2 id="settings-dialog-title">Page settings</h2>
           </div>
           <button value="cancel" class="close-button" aria-label="Close page settings">×</button>
         </div>
@@ -94,12 +94,12 @@
       </form>
     </dialog>
 
-    <dialog id="versions-dialog" class="modal versions-modal">
+    <dialog id="versions-dialog" class="modal versions-modal" aria-labelledby="versions-dialog-title">
       <form method="dialog">
         <div class="modal-heading">
           <div>
             <span class="eyebrow">One worksheet, purposeful versions</span>
-            <h2>Versions</h2>
+            <h2 id="versions-dialog-title">Versions</h2>
           </div>
           <button value="cancel" class="close-button" aria-label="Close worksheet versions">×</button>
         </div>
@@ -109,6 +109,6 @@
 
     <!-- Release-address the entry module so an installed browser does not keep
          an older app graph while the service worker is updating. -->
-    <script type="module" src="./js/app.js?v=build3-v4"></script>
+    <script type="module" src="./js/app.js?v=release-v1"></script>
   </body>
 </html>

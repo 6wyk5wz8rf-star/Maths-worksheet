@@ -86,7 +86,7 @@ const definitions = [
     printBehaviour: "Repeats headings and keeps every digit aligned in a single unsplittable chart.",
     monochromeBehaviour: "Column borders and text labels carry all meaning; colour is optional.",
     matchingTags: ["digit", "place value", "value of", "thousands", "hundreds", "tens", "ones"],
-    contraindications: ["decimal-place questions in Build 1", "numbers requiring more than seven columns"],
+    contraindications: ["decimal-place questions", "numbers requiring more than seven columns"],
     editorFields: [
       field("values.number", "Number", "integer"),
       field("values.minimumPlaces", "Minimum columns", "integer", { min: 1, max: 7 }),
@@ -265,7 +265,7 @@ const definitions = [
     printBehaviour: "Uses a true column grid; signs sit outside digit columns and rows stay together.",
     monochromeBehaviour: "Rules, place headings and symbols retain alignment in monochrome.",
     matchingTags: ["column", "add", "subtract", "exchange", "regroup", "+", "−"],
-    contraindications: ["decimals in Build 1", "negative operands", "subtraction with more than two operands"],
+    contraindications: ["decimal operands", "negative operands", "subtraction with more than two operands"],
     editorFields: [
       field("values.operation", "Operation", "choice", { options: ["addition", "subtraction"] }),
       field("values.operands", "Numbers", "integer-list"),
@@ -519,7 +519,7 @@ function normalizePlaceValue(recipe, warnings, errors) {
   }
   const requested = Math.round(Number(recipe.values.minimumPlaces) || 1);
   const places = Math.max(String(number).length, requested, 1);
-  if (places > 7) errors.push(error("TOO_MANY_PLACE_COLUMNS", "Build 1 place-value charts support at most seven columns."));
+  if (places > 7) errors.push(error("TOO_MANY_PLACE_COLUMNS", "Place-value charts support at most seven columns."));
   recipe.values.number = number;
   recipe.values.minimumPlaces = Math.min(7, Math.max(1, requested));
   recipe.values.columns = digitsFor(number, Math.min(7, places));
@@ -678,8 +678,8 @@ function normalizeColumnArithmetic(recipe, warnings, errors) {
     errors.push(error("INVALID_COLUMN_OPERANDS", "Column arithmetic needs at least two non-negative whole-number operands."));
     return;
   }
-  if (operation === "subtraction" && operands.length !== 2) errors.push(error("SUBTRACTION_ARITY", "A Build 1 subtraction frame uses exactly two operands."));
-  if (operation === "subtraction" && operands[0] < operands[1]) errors.push(error("NEGATIVE_COLUMN_RESULT", "Build 1 column subtraction does not display a negative result."));
+  if (operation === "subtraction" && operands.length !== 2) errors.push(error("SUBTRACTION_ARITY", "A subtraction frame uses exactly two operands."));
+  if (operation === "subtraction" && operands[0] < operands[1]) errors.push(error("NEGATIVE_COLUMN_RESULT", "Column subtraction does not display a negative result."));
   const computed = operation === "addition"
     ? operands.reduce((sum, value) => sum + value, 0)
     : operands[0] - operands[1];
@@ -708,7 +708,7 @@ function normalizeMultiplicationGrid(recipe, warnings, errors) {
     errors.push(error("WHOLE_GRID_REQUIRED", "A multiplication grid needs positive whole-number rows and columns."));
     return;
   }
-  if (rows > 20 || columns > 20) errors.push(error("GRID_TOO_LARGE", "A countable Build 1 grid supports at most twenty rows and columns."));
+  if (rows > 20 || columns > 20) errors.push(error("GRID_TOO_LARGE", "A countable grid supports at most twenty rows and columns."));
   const product = rows * columns;
   if (finite(recipe.values.product) && Number(recipe.values.product) !== product) warnings.push(warning("PRODUCT_NORMALIZED", "The product was recalculated from the grid dimensions."));
   const rowPartitions = Array.isArray(recipe.values.rowPartitions) ? recipe.values.rowPartitions.map(Number) : [];
