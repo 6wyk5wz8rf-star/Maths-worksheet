@@ -7,14 +7,14 @@ import {
   normalisePurpose,
   presetSettings,
   purposeToIntent,
-} from './worksheet-architecture.js';
+} from './worksheet-architecture.js?v=build3-v2';
 import {
   createPresetVariant,
   createVariant,
   deriveVersionOverrides,
   normaliseVersions,
   resolveWorksheetVersion,
-} from './worksheet-versions.js';
+} from './worksheet-versions.js?v=build3-v2';
 
 /**
  * Maths Page Studio worksheet state.

@@ -23,17 +23,17 @@ import {
   saveProject,
   worksheetActions,
   createId,
-} from './state.js';
-import { paginateWorksheet, mmToPx } from './pagination.js';
+} from './state.js?v=build3-v2';
+import { paginateWorksheet, mmToPx } from './pagination.js?v=build3-v2';
 import {
   SECTION_ROLES,
   STYLE_PRESETS,
   WORKSHEET_PURPOSES,
   suggestNewQuestionOrder,
   suggestWorksheetArchitecture,
-} from './worksheet-architecture.js';
-import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js';
-import { createSafeNumberVariation } from './number-variation.js';
+} from './worksheet-architecture.js?v=build3-v2';
+import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=build3-v2';
+import { createSafeNumberVariation } from './number-variation.js?v=build3-v2';
 
 const SAMPLE_TEXT = `Place value
 

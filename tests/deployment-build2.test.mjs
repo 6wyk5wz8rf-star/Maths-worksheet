@@ -29,6 +29,10 @@ function localImportSpecifiers(source) {
   return [...specifiers];
 }
 
+function withoutReleaseQuery(path) {
+  return path.split(/[?#]/, 1)[0];
+}
+
 async function moduleDependencyPaths(entryPath) {
   const pending = [entryPath];
   const visited = new Set();
@@ -41,7 +45,7 @@ async function moduleDependencyPaths(entryPath) {
     const source = await readProjectFile(currentPath);
     const currentDirectory = dirname(resolve(rootDirectory, currentPath));
     for (const specifier of localImportSpecifiers(source)) {
-      const absoluteModulePath = resolve(currentDirectory, specifier);
+      const absoluteModulePath = resolve(currentDirectory, withoutReleaseQuery(specifier));
       const projectRelativePath = relative(rootDirectory, absoluteModulePath).replaceAll('\\', '/');
       assert.ok(!projectRelativePath.startsWith('../'), `Local module ${specifier} must remain inside the project.`);
       pending.push(projectRelativePath);
@@ -56,6 +60,28 @@ test('Build 3 uses a fresh, explicit cache namespace', async () => {
   assert.match(worker, /const CACHE = 'maths-page-studio-build-3-v\d+';/);
   assert.match(worker, /self\.skipWaiting\(\)/);
   assert.match(worker, /self\.clients\.claim\(\)/);
+});
+
+test('Build 3 release-addresses its changed module graph so an existing installed shell updates cleanly', async () => {
+  const [html, app, state, worker] = await Promise.all([
+    readProjectFile('index.html'),
+    readProjectFile('js/app.js'),
+    readProjectFile('js/state.js'),
+    readProjectFile('service-worker.js'),
+  ]);
+  const release = 'build3-v2';
+  assert.match(html, new RegExp(`\\./js/app\\.js\\?v=${release}`));
+  for (const source of [app, state]) assert.match(source, new RegExp(`\\?v=${release}`));
+  for (const path of [
+    './js/app.js',
+    './js/state.js',
+    './js/pagination.js',
+    './js/worksheet-architecture.js',
+    './js/worksheet-versions.js',
+    './js/number-variation.js',
+  ]) {
+    assert.match(worker, new RegExp(`${path.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\?v=${release}`));
+  }
 });
 
 test('the offline shell pre-caches every statically imported local application module', async () => {
@@ -88,7 +114,7 @@ test('Pages shell, manifest and worker paths remain project-relative and resolve
   for (const path of assetPaths) {
     assert.ok(path.startsWith('./'), `${path} must be relative to the GitHub Pages project path.`);
     if (path === './') continue;
-    await access(resolve(rootDirectory, path.slice(2)));
+    await access(resolve(rootDirectory, withoutReleaseQuery(path.slice(2))));
   }
 
   assert.match(app, /register\('\.\/service-worker\.js'\)/, 'The app must register the worker relative to the project path.');
