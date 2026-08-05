@@ -151,7 +151,10 @@ function findMarkAllocation(text) {
 function extractSubparts(text) {
   const source = String(text ?? '');
   const markers = [];
-  const pattern = /(^|\r?\n|[ \t]+)(\(([a-z])\)|([a-z])\))[ \t]+/gim;
+  // Copied UK worksheets commonly use all three forms: (a), a) and a.
+  // readListMarker already accepts them, so retain the same punctuation here
+  // when the parent question is assembled from several source lines.
+  const pattern = /(^|\r?\n|[ \t]+)(\(([a-z])\)|([a-z])[.)])[ \t]+/gim;
   let match;
   while ((match = pattern.exec(source)) !== null) {
     const markerOffset = match[1].length;
@@ -246,6 +249,7 @@ function makeItem(builder, source, counters, activeContext) {
 
   const marks = findMarkAllocation(displayText);
   const mathInfo = extractMathInfo(displayText);
+  const subparts = extractSubparts(displayText);
   return {
     ...base,
     sourceLabel: marker?.label ?? null,
@@ -255,8 +259,8 @@ function makeItem(builder, source, counters, activeContext) {
     sharedInstructionId: activeContext.instructionId,
     marks: marks?.marks ?? null,
     markText: marks?.raw ?? null,
-    subparts: extractSubparts(displayText),
-    mathInfo
+    subparts,
+    mathInfo: { ...mathInfo, subparts },
   };
 }
 
@@ -429,6 +433,8 @@ function hasMultiplicativeEachContext(source) {
     new RegExp(`\\b${number}\\s+${item}(?:\\s+${item}){0,2}\\s+each\\s+(?:has|have|holds?|contains?|gets?|costs?|weighs?|measures?|needs?)\\s+${number}\\b`, 'i'),
     new RegExp(`\\beach\\s+${item}(?:\\s+${item}){0,2}\\s+(?:has|have|holds?|contains?|gets?|costs?|weighs?|measures?|needs?)\\s+${number}\\b`, 'i'),
     new RegExp(`\\b${number}\\s+${item}(?:\\s+${item}){0,2}\\s+(?:are|is|were|was)?\\s*(?:placed|put|packed|shared|given)?\\s*(?:in|into|for)\\s+each\\s+(?:of\\s+)?${number}\\b`, 'i'),
+    new RegExp(`\\beach\\s+of\\s+${number}\\s+${item}(?:\\s+${item}){0,2}\\s+(?:has|have|holds?|contains?|gets?|costs?|weighs?|measures?|needs?)\\s+${number}\\b`, 'i'),
+    new RegExp(`\\b${number}\\s+(?:packs?|trays?|boxes?|bags?)\\s+of\\s+${number}\\b`, 'i'),
   ];
   return patterns.some((pattern) => pattern.test(source));
 }
@@ -594,15 +600,15 @@ export function extractMathInfo(text) {
   ])];
 
   let operationLanguage = detectWords(source, [
-    ['addition', /\b(?:add|added|addition|altogether|combined|in all|sum|total)\b/i],
-    ['subtraction', /\b(?:subtract|subtraction|take away|difference|remain(?:ing)?|left over|fewer)\b/i],
-    ['multiplication', /\b(?:multiply|multiplication|product|times|groups? of|lots? of|rows? of)\b/i],
-    ['division', /\b(?:divide|division|share|shared|sharing|equally|groups? can|groups? are)\b/i]
+    ['addition', /\b(?:add|added|addition|altogether|combined|in all|sum|total|bought|received|collected|gained)\b/i],
+    ['subtraction', /\b(?:subtract|subtraction|take away|difference|remain(?:ing)?|left over|fewer|sold|spent|used|gave away|removed|lost)\b/i],
+    ['multiplication', /\b(?:multiply|multiplication|product|times|twice|double|groups? of|lots? of|rows? of|packs? of|trays? of)\b/i],
+    ['division', /\b(?:divide|division|share|shared|sharing|equally|groups? can|groups? are|how many\s+\d+(?:s|'s)?\s+(?:are there|in))\b/i]
   ]);
   if (hasMultiplicativeEachContext(source) && !operationLanguage.includes('multiplication')) {
     operationLanguage.push('multiplication');
   }
-  const clearDivisionContext = /\b(?:share|shared|sharing|divide|division|how many\s+groups?|groups?\s+can\s+be\s+made)\b/i.test(source);
+  const clearDivisionContext = /\b(?:share|shared|sharing|divide|division|how many\s+groups?|groups?\s+can\s+be\s+made|how many\s+\d+(?:s|'s)?\s+(?:are there|in)|(?:put|placed|packed)\s+into\s+(?:bags?|boxes?|packs?)\s+of)\b/i.test(source);
   if (clearDivisionContext && !operationLanguage.includes('division')) operationLanguage.push('division');
   if (clearDivisionContext && !/\b(?:multiply|multiplication|product|times)\b|\u00d7/i.test(source)) {
     operationLanguage = operationLanguage.filter((operation) => operation !== 'multiplication');
@@ -615,7 +621,7 @@ export function extractMathInfo(text) {
   if (divisionRemainderContext && !explicitSubtractionContext) {
     operationLanguage = operationLanguage.filter((operation) => operation !== 'subtraction');
   }
-  const clearMultiplicationContext = /\b(?:multiply|multiplication|product|times|groups? of|rows? of|lots? of)\b|\u00d7/i.test(source)
+  const clearMultiplicationContext = /\b(?:multiply|multiplication|product|times|twice|double|groups? of|rows? of|lots? of)\b|\u00d7/i.test(source)
     || hasMultiplicativeEachContext(source);
   if (clearMultiplicationContext
     && !/\b(?:add|added|addition|sum|combined|in all)\b|\+/i.test(source)) {
@@ -623,8 +629,8 @@ export function extractMathInfo(text) {
   }
 
   const symbolicOperations = [];
-  if (/\d\s*\+\s*[\d?]/.test(source)) symbolicOperations.push('addition');
-  if (/\d\s*[\u2212-]\s*[\d?]/.test(source)) symbolicOperations.push('subtraction');
+  if (/\d\s*\+\s*(?:[£$€]\s*)?[\d?]/.test(source)) symbolicOperations.push('addition');
+  if (/\d\s*[\u2212-]\s*(?:[£$€]\s*)?[\d?]/.test(source)) symbolicOperations.push('subtraction');
   if (/\d\s*(?:\u00d7|[x*])\s*[\d?]/i.test(source)) symbolicOperations.push('multiplication');
   if (/\d\s*(?:\u00f7|\/)\s*[\d?]/.test(source) && !fractions.length) symbolicOperations.push('division');
   const operations = [...new Set([...symbolicOperations, ...operationLanguage])];
@@ -644,15 +650,16 @@ export function extractMathInfo(text) {
   let divisionInterpretation = null;
   if (operations.includes('division')) {
     const sharing = /\b(?:share|shared|sharing|divide|split)\b[^.?!\n]*\b(?:between|among|equally|each gets?)\b|\bshared equally\b/i.test(source);
-    const grouping = /\b(?:how many|make|made into|form)\s+groups?\b|\bgroups? of\s+\d/i.test(source);
+    const grouping = /\b(?:how many|make|made into|form)\s+groups?\b|\bgroups? of\s+\d|\bhow many\s+\d+(?:s|'s)?\s+(?:are there|in)\b|\b(?:put|placed|packed)\s+into\s+(?:bags?|boxes?|packs?)\s+of\s+\d/i.test(source);
     if (sharing && !grouping) divisionInterpretation = 'sharing';
     else if (grouping && !sharing) divisionInterpretation = 'grouping';
     else divisionInterpretation = 'ambiguous';
   }
 
-  const representationNoun = '(?:diagram|model|chart|graph|pictogram|number line|array|grid|table|clock|shape|thermometer|scale|ruler|picture|image|figure)';
+  const representationNoun = '(?:diagram|model|chart|graph|pictogram|number line|array|grid|table|clock|shape|triangle|quadrilateral|polygon|angle|jug|container|measuring cylinder|thermometer|scale|ruler|picture|image|figure)';
   const hasExistingRepresentation = [
     new RegExp(`\\b${representationNoun}\\s+(?:below|above|shown|provided|given)\\b`, 'i'),
+    new RegExp(`\\b${representationNoun}\\s+(?:is|are|was|were)\\s+(?:shown|provided|given)\\b`, 'i'),
     new RegExp(`\\bshown\\s+(?:in|on|by)\\s+(?:the|this|that|these|those)\\s+${representationNoun}\\b`, 'i'),
     new RegExp(`\\b(?:use|read|look\\s+at|refer\\s+to|from)\\s+(?:the|this|that|these|those|following)\\s+${representationNoun}\\b`, 'i'),
     new RegExp(`\\b(?:the|this|that|these|those)\\s+${representationNoun}\\s+(?:shows?|represents?|gives?|contains?|has|is)\\b`, 'i'),

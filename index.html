@@ -8,7 +8,7 @@
     <title>Maths Page Studio</title>
     <link rel="manifest" href="./manifest.webmanifest">
     <link rel="icon" href="./assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="./css/styles.css?v=release-v4">
+    <link rel="stylesheet" href="./css/styles.css?v=release-v5">
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to worksheet</a>
@@ -59,7 +59,7 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <dialog id="confirm-dialog" class="modal confirm-modal" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <dialog id="confirm-dialog" class="modal confirm-modal" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
       <form method="dialog">
         <span class="modal-symbol" aria-hidden="true">?</span>
         <h2 id="confirm-title">Are you sure?</h2>
@@ -71,7 +71,7 @@
       </form>
     </dialog>
 
-    <dialog id="project-dialog" class="modal project-modal" aria-labelledby="project-dialog-title">
+    <dialog id="project-dialog" class="modal project-modal" aria-modal="true" aria-labelledby="project-dialog-title">
       <form method="dialog">
         <div class="modal-heading">
           <div>
@@ -87,7 +87,7 @@
       </form>
     </dialog>
 
-    <dialog id="settings-dialog" class="modal settings-modal" aria-labelledby="settings-dialog-title">
+    <dialog id="settings-dialog" class="modal settings-modal" aria-modal="true" aria-labelledby="settings-dialog-title">
       <form method="dialog">
         <div class="modal-heading">
           <div>
@@ -100,7 +100,7 @@
       </form>
     </dialog>
 
-    <dialog id="versions-dialog" class="modal versions-modal" aria-labelledby="versions-dialog-title">
+    <dialog id="versions-dialog" class="modal versions-modal" aria-modal="true" aria-labelledby="versions-dialog-title">
       <form method="dialog">
         <div class="modal-heading">
           <div>
@@ -115,6 +115,6 @@
 
     <!-- Release-address the entry module so an installed browser does not keep
          an older app graph while the service worker is updating. -->
-    <script type="module" src="./js/app.js?v=release-v4"></script>
+    <script type="module" src="./js/app.js?v=release-v5"></script>
   </body>
 </html>

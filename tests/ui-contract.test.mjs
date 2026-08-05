@@ -42,9 +42,30 @@ test('A4 preview and browser print share exact fixed geometry', async () => {
   assert.match(css, /print-color-adjust:\s*exact/);
 });
 
+test('positioned print blocks and exact response rows share the paginator box model', async () => {
+  const css = await source('css/styles.css');
+  assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;/, 'native hidden state must override component display rules');
+  assert.match(css, /\.question-block\s*\{\s*position:\s*absolute;/, 'millimetre left/top placements need an absolute containing block');
+  assert.match(css, /\.workbook-cutouts \.question-block\s*\{[\s\S]*?padding:\s*var\(--block-pad,\s*3mm\);/);
+  assert.match(css, /\.model-slot\s*\{[\s\S]*?margin:\s*3mm 0 1mm 9mm;/, 'the paginator must account for the rendered model indent and margins');
+  for (const family of ['place-value', 'base-ten', 'partition']) {
+    assert.match(css, new RegExp(`\\.question-layout-beside:has\\(\\[data-model-family="${family}"\\]\\)`), `${family} models must escape the unreadable beside track`);
+  }
+  assert.match(css, /\.workbook-cutouts \.question-layout-beside:has\(\[data-build2-model\]\)\s*\{\s*display:\s*block;/, 'Build 2 models must receive the complete allotted workbook column');
+  assert.match(css, /\.workbook-cutouts \.question-layout-beside:has\(\[data-build2-model\]\) \.model-slot\s*\{\s*margin:\s*3mm 0 1mm 9mm;/);
+  assert.match(css, /\.response-space\s*\{\s*margin:\s*2\.5mm 0 0 9mm;/, 'the paginator must account for the rendered response indent and margin');
+  assert.match(css, /\.response-lines\s*\{\s*display:\s*flex;[^}]*flex-direction:\s*column;[^}]*justify-content:\s*space-between;[^}]*gap:\s*0;/, 'writing lines must distribute inside their exact declared height');
+  assert.match(css, /\.response-table > div\s*\{[^}]*min-height:\s*7mm;/);
+  assert.match(css, /\.response-steps > div\s*\{[^}]*min-height:\s*7mm;/);
+  assert.doesNotMatch(css, /\.response-lines\s*\{[^}]*gap:\s*6\.5mm;/, 'fixed gaps must not push a requested row count outside its measured response box');
+});
+
 test('touch, reduced motion and iPad-width layouts have explicit support', async () => {
   const css = await source('css/styles.css');
   assert.match(css, /--tap:\s*44px/);
+  assert.match(css, /\.quiet-actions button\s*\{\s*min-height:\s*var\(--tap\);/);
+  assert.match(css, /\.choice-button\s*\{\s*min-height:\s*var\(--tap\);/);
+  assert.match(css, /\.clarify-actions button\s*\{\s*min-height:\s*var\(--tap\);/);
   assert.match(css, /@media \(max-width:\s*980px\)/);
   assert.match(css, /@media \(max-width:\s*760px\)/);
   assert.match(css, /prefers-reduced-motion/);
@@ -61,7 +82,6 @@ test('release UI keeps worksheet controls contextual and tablet navigation reach
   assert.match(css, /\.block-screen-tools\.screen-only\s*\{\s*display:\s*none;/);
   assert.match(css, /\.question-block\.is-selected \.block-screen-tools\.screen-only\s*\{\s*display:\s*grid;/);
   assert.match(css, /\.print-preview-panel \.block-screen-tools\.screen-only\s*\{\s*display:\s*none\s*!important;/);
-  assert.match(css, /\.mobile-panel-tabs\s*\{\s*display:\s*none;/);
   assert.match(css, /\.mobile-navigator-sheet\s*\{[\s\S]*?display:\s*none;/);
   assert.match(css, /\.mobile-navigator-sheet\.is-open\s*\{\s*display:\s*block;/);
   assert.match(css, /\.make-layout\s*\{[\s\S]*?display:\s*block;/);
@@ -71,17 +91,35 @@ test('release UI keeps worksheet controls contextual and tablet navigation reach
   const finalTabletStart = css.lastIndexOf('@media (max-width: 980px)');
   const bottomSheetStart = css.indexOf('@media (max-width: 820px)', finalTabletStart);
   const tabletCss = css.slice(finalTabletStart, bottomSheetStart);
-  assert.match(tabletCss, /\.mobile-panel-tabs\s*\{\s*display:\s*none;/);
+  const bottomSheetCss = css.slice(bottomSheetStart, css.indexOf('@media (max-width: 640px)', bottomSheetStart));
   assert.match(tabletCss, /\.make-toolbar\s*\{[\s\S]*?height:\s*60px;/);
   assert.match(tabletCss, /\.make-layout\s*\{[\s\S]*?display:\s*block;/);
+  assert.match(bottomSheetCss, /body\[data-stage="make"\] \.brand-copy\s*\{\s*display:\s*none;/);
+  assert.match(bottomSheetCss, /body\[data-stage="make"\] \.project-title-input\s*\{\s*width:\s*min\(18vw, 150px\);/);
+  assert.match(bottomSheetCss, /body\[data-stage="make"\] \.page-status\s*\{\s*display:\s*none;/);
+  assert.match(css, /body\[data-stage="make"\] \.make-toolbar\s*\{[\s\S]*?position:\s*fixed;/);
+  assert.doesNotMatch(css, /\.mobile-panel-tabs|\.question-navigator|\.stage-nav|\.stage-step|\.batch-menu/);
   assert.doesNotMatch(css, /\.view-toggle\s*\{\s*display:\s*none;/);
   assert.doesNotMatch(css, /\.card-tools \.move-tool\s*\{\s*display:\s*none;/);
   assert.match(app, /data-action="set-sheet-format" data-value="workbook"/);
+  assert.match(app, /Workbook cut-outs do not fit their trim areas safely\. Nothing has been shrunk\./);
   assert.match(app, /Workbook cut-outs need \$\{pagination\.pageCount\} pages at a readable size\. Nothing has been shrunk\./);
   assert.match(app, /data-role="model-size-select"/);
   assert.match(app, /value="extra-large"/);
   assert.match(app, /function questionNeedsReview/);
   assert.match(app, /function readableQuestionFamily/);
+});
+
+test('a missing referenced visual is explained explicitly instead of as generic uncertainty', async () => {
+  const app = await source('js/app.js');
+  const interpretationControls = app.slice(
+    app.indexOf('function renderInterpretationControls'),
+    app.indexOf('function renderInspector'),
+  );
+  assert.match(interpretationControls, /interpretation\?\.status === 'needs-referenced-visual'/);
+  assert.match(interpretationControls, /Referenced visual missing; no replacement invented\./);
+  assert.match(interpretationControls, /Add the original clock, chart, table or diagram again/);
+  assert.match(interpretationControls, /Choose replacement manually/);
 });
 
 test('automatic reanalysis fails closed and reopening workbook format preserves its edits', async () => {
@@ -109,8 +147,8 @@ test('automatic reanalysis fails closed and reopening workbook format preserves 
 
 test('tablet sheets expose their state and move focus into and back from the active region', async () => {
   const app = await source('js/app.js');
-  assert.match(app, /id="mobile-question-navigator" role="region" aria-labelledby="mobile-question-navigator-title" tabindex="-1"/);
-  assert.match(app, /id="question-inspector"[\s\S]*?role="region" aria-labelledby="question-inspector-title" tabindex="-1"/);
+  assert.match(app, /id="mobile-question-navigator" role="dialog" aria-modal="\$\{ui\.navigatorOpen\}" aria-labelledby="mobile-question-navigator-title" tabindex="-1"/);
+  assert.match(app, /id="question-inspector"[\s\S]*?role="dialog" aria-modal="\$\{ui\.inspectorOpen\}" aria-labelledby="question-inspector-title" tabindex="-1"/);
   assert.match(app, /data-action="open-navigator" aria-controls="mobile-question-navigator" aria-expanded="\$\{ui\.navigatorOpen\}"/);
   assert.match(app, /ui\.selectedId = worksheetBlock\.dataset\.blockId;[\s\S]*?openMobilePanel\('inspector'\);/);
   assert.match(app, /function openMobilePanel\(panelName, returnSelector = null\)[\s\S]*?render\(\);[\s\S]*?focusAfterRender\(`#\$\{CSS\.escape\(config\.id\)\}`\);/);
@@ -161,7 +199,7 @@ test('every print route synchronously commits the focused teacher field', async 
 test('browser print can release the Compose workspace without app chrome or viewport clamps', async () => {
   const css = await source('css/styles.css');
   const printCss = css.slice(css.indexOf('@media print'));
-  for (const selector of ['.question-navigator', '.inspector', '.mobile-navigator-sheet', '.mobile-panel-tabs']) {
+  for (const selector of ['.inspector', '.mobile-navigator-sheet']) {
     assert.ok(printCss.includes(selector), `${selector} must be hidden from direct browser printing.`);
   }
   for (const selector of ['.make-stage', '.make-layout', '.workspace-scroll']) {

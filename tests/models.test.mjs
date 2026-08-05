@@ -172,6 +172,19 @@ test("wide model size choices progressively enlarge the complete printed represe
   assert.ok(viewBoxes.every(({ height }, index) => index === 0 || height >= viewBoxes[index - 1].height));
 });
 
+test("Large and Extra large legacy models increase their printed label scale", () => {
+  const scales = ["standard", "large", "extra-large"].map((size) => {
+    const html = renderModel(createModelRecipe(MODEL_IDS.PLACE_VALUE, {
+      size,
+      values: { number: 3482, minimumPlaces: 4 },
+    }));
+    const match = html.match(/--mps-model-text-scale:([\d.]+)/);
+    assert.ok(match, `${size} model needs an explicit print text scale`);
+    return Number(match[1]);
+  });
+  assert.deepEqual(scales, [1, 1.14, 1.28]);
+});
+
 test("number-line divisions are bounded and out-of-range markers are omitted with warnings", () => {
   const validation = validateRecipe(createModelRecipe(MODEL_IDS.NUMBER_LINE, {
     values: {

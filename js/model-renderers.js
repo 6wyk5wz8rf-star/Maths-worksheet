@@ -87,6 +87,7 @@ function safeDescription(definition, recipe) {
 
 function svgFrame(recipe, definition, content, options = {}) {
   const box = options.box ?? SIZE_BOXES[recipe.size] ?? SIZE_BOXES.standard;
+  const textScale = ({ compact: 0.92, standard: 1, large: 1.14, 'extra-large': 1.28 })[recipe.size] ?? 1;
   const id = renderId(recipe);
   const title = escapeMarkup(options.title ?? definition.name);
   const description = escapeMarkup(options.description ?? safeDescription(definition, recipe));
@@ -95,7 +96,7 @@ function svgFrame(recipe, definition, content, options = {}) {
       <line x1="0" y1="0" x2="0" y2="8" class="mps-model__hatch-line" stroke="currentColor" stroke-width="2" opacity=".28" />
     </pattern>
   </defs>`;
-  return `<figure class="mps-model mps-model--${escapeMarkup(recipe.family)} mps-model--${escapeMarkup(recipe.size)}" data-model-family="${escapeMarkup(recipe.family)}" data-model-size="${escapeMarkup(recipe.size)}" data-completion-state="${escapeMarkup(recipe.completionState)}" role="group" aria-label="${title}">
+  return `<figure class="mps-model mps-model--${escapeMarkup(recipe.family)} mps-model--${escapeMarkup(recipe.size)}" data-model-family="${escapeMarkup(recipe.family)}" data-model-size="${escapeMarkup(recipe.size)}" data-completion-state="${escapeMarkup(recipe.completionState)}" style="--mps-model-text-scale:${textScale}" role="group" aria-label="${title}">
     <svg class="mps-model__svg" viewBox="0 0 ${box.width} ${box.height}" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="${id}-title ${id}-desc" xmlns="http://www.w3.org/2000/svg">
       <title id="${id}-title">${title}</title>
       <desc id="${id}-desc">${description}</desc>

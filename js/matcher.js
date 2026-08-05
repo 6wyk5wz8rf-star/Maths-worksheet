@@ -1,6 +1,6 @@
 import { extractMathInfo } from './parser.js';
 import { analyseQuestion, isModelContraindicated, parseNumberLinePrompt, rankModelRecommendations } from './question-intelligence.js';
-import { createModelRecipe as createRegisteredRecipe, getModelDefinition, listModelDefinitions } from './model-registry.js';
+import { createModelRecipe as createRegisteredRecipe, getModelDefinition, listModelDefinitions, validateRecipe } from './model-registry.js';
 
 /** Slugs are stable recipe identifiers shared by matching and rendering. */
 export const BUILD1_MODEL_FAMILIES = Object.freeze([
@@ -71,6 +71,25 @@ function scoreConfidence(score) {
 function lowerConfidence(left, right) {
   const rank = { low: 0, medium: 1, high: 2 };
   return (rank[left] ?? 0) <= (rank[right] ?? 0) ? left : right;
+}
+
+function semanticRecommendationKey(suggestion, info) {
+  if (info.divisionInterpretation === 'sharing'
+    && ['sharing-division', 'equal-groups'].includes(suggestion.family)) return 'division:sharing';
+  if (info.divisionInterpretation === 'grouping'
+    && ['grouping-division', 'equal-groups'].includes(suggestion.family)) return 'division:grouping';
+  return `family:${suggestion.family}`;
+}
+
+function collapseSemanticEquivalentSuggestions(suggestions, info) {
+  const retained = new Map();
+  for (const suggestion of suggestions) {
+    const key = semanticRecommendationKey(suggestion, info);
+    const existing = retained.get(key);
+    if (!existing || suggestion.score > existing.score) retained.set(key, suggestion);
+  }
+  return [...retained.values()]
+    .sort((left, right) => right.score - left.score || left.family.localeCompare(right.family));
 }
 
 function familyCandidate(family, score, reason, explicit = false) {
@@ -548,17 +567,34 @@ function chartRowsFromText(source) {
   const cleaned = String(source ?? '')
     .replace(/\[[^\]]*marks?[^\]]*\]|\([^)]*marks?[^)]*\)/gi, ' ')
     .replace(/[.?!]+$/g, '');
-  const pattern = /\b(\d+(?:,\d{3})*(?:\.\d+)?)\s+([a-z][a-z -]*?)(?=\s*(?:,|;|\band\b|$))/gi;
-  for (const match of cleaned.matchAll(pattern)) {
-    const value = Number(match[1].replaceAll(',', ''));
-    const label = match[2]
+  const addRow = (match, valueIndex, labelIndex) => {
+    const value = Number(match[valueIndex].replaceAll(',', ''));
+    const label = match[labelIndex]
       .replace(/\b(?:votes?|items?|children|people|pupils?|responses?)\s*$/i, '')
       .trim();
-    if (!Number.isFinite(value) || !label || /^(?:bar\s+chart|chart|graph)$/i.test(label)) continue;
-    rows.push({ label: label.replace(/\b\w/g, (letter) => letter.toUpperCase()), value });
-    if (rows.length === 8) break;
-  }
-  return rows;
+    if (!Number.isFinite(value) || !label || /^(?:bar\s+chart|chart|graph)$/i.test(label)) return;
+    rows.push({
+      sourceIndex: match.index,
+      label: label.replace(/\b\w/g, (letter) => letter.toUpperCase()),
+      value,
+    });
+  };
+  const valueFirst = /\b(\d+(?:,\d{3})*(?:\.\d+)?)\s+([a-z][a-z -]*?)(?=\s*(?:,|;|\band\b|$))/gi;
+  const labelFirst = /\b([a-z][a-z -]*?)\s*:\s*(\d+(?:,\d{3})*(?:\.\d+)?)(?=\s*(?:,|;|\band\b|$))/gi;
+  const plainLabelFirst = /(?:^|[:,;]|\band\b)\s*([a-z][a-z -]*?)\s+(\d+(?:,\d{3})*(?:\.\d+)?)(?=\s*(?:,|;|\band\b|$))/gi;
+  for (const match of cleaned.matchAll(valueFirst)) addRow(match, 1, 2);
+  for (const match of cleaned.matchAll(labelFirst)) addRow(match, 2, 1);
+  for (const match of cleaned.matchAll(plainLabelFirst)) addRow(match, 2, 1);
+  const seen = new Set();
+  return rows
+    .sort((left, right) => left.sourceIndex - right.sourceIndex)
+    .filter((row) => {
+      const key = `${row.sourceIndex}:${row.label}:${row.value}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(({ label, value }) => ({ label, value }));
 }
 
 /** Translate intelligence vocabulary into the exact renderer blanks. */
@@ -576,6 +612,9 @@ function protectedTokensFor(family, interpretation) {
   if (requested.has('rounded-value')) hidden.add('rounded-result');
   if (requested.has('fraction-of-quantity-result')) hidden.add('selected-total');
   if (requested.has('equivalent-fraction') || (family === 'equivalent-fraction-strips' && ['numerator', 'denominator'].includes(structure.unknownPosition))) hidden.add('equivalence');
+  for (const token of requested) {
+    if (/^fraction:\d+:(?:numerator|denominator)$/.test(token)) hidden.add(token);
+  }
   if (requested.has('comparison-symbol')) hidden.add('comparison-symbol');
   if (requested.has('perimeter')) hidden.add('perimeter');
   if (requested.has('area')) hidden.add('area');
@@ -701,6 +740,13 @@ function build2ValuesFor(family, info, interpretation) {
       result: family === 'change-bar' ? changeStart + signedChange : structure.endValue ?? null,
       direction: signedChange < 0 ? 'decrease' : 'increase',
     });
+    if (family === 'scaling-bar') {
+      Object.assign(base, {
+        original: structure.originalValue,
+        multiplier: structure.multiplier,
+        scaled: structure.scaledValue,
+      });
+    }
   }
   if (family === 'clock-model') {
     const time = info.times?.[0];
@@ -711,7 +757,10 @@ function build2ValuesFor(family, info, interpretation) {
     const endMinutes = privateTimeMinutes(info.times?.[1]);
     Object.assign(base, {
       startMinutes: startMinutes ?? 635,
-      endMinutes: endMinutes ?? 730,
+      endMinutes: endMinutes != null && startMinutes != null
+        && structure.measurement.crossesMidnight && endMinutes < startMinutes
+        ? endMinutes + (24 * 60)
+        : endMinutes ?? 730,
       showJumps: true,
     });
   }
@@ -779,6 +828,8 @@ function createBuild2Recipe(family, info, options) {
     && ['bar-chart', 'pictogram', 'line-graph', 'tally-frequency-table'].includes(family)
     && !(values.rows?.length)) return null;
   if (constructionTask && family === 'clock-model' && (info.times?.length ?? 0) !== 1) return null;
+  if (family === 'scaling-bar'
+    && (!Number.isFinite(values.original) || !Number.isInteger(values.multiplier) || !Number.isFinite(values.scaled))) return null;
   return createRegisteredRecipe(family, {
     values,
     unknown: primaryUnknownFor(family, interpretation, hidden),
@@ -803,12 +854,13 @@ export function createModelRecipe(family, infoOrText, options = {}) {
 
   const intent = INTENTS.has(options.intent) ? options.intent : 'practice';
   const completionState = requestedCompletion(intent, options.completionState);
-  const purpose = options.purpose || inferPurpose(info, intent);
+  const interpretation = options.interpretation ?? null;
+  const purpose = options.purpose
+    || (interpretation?.questionFamily === 'partition' ? 'response-model' : inferPurpose(info, intent));
   const values = info.numericValues;
   const integers = wholeNumbers(info);
   const positives = positiveWholeNumbers(info);
   const unit = info.units[0] ?? null;
-  const interpretation = options.interpretation ?? null;
   let variant;
   let recipeValues;
   let unknown = info.unknowns[0] ?? null;
@@ -1036,11 +1088,26 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
     warnings.push('The referenced visual is missing, so no replacement model has been suggested.');
   }
 
-  const suggestions = candidates.slice(0, 3).map((candidate) => {
-    const recipe = createModelRecipe(candidate.family, info, { ...options, intent, interpretation });
+  const validSuggestions = [];
+  let rejectedRecipes = 0;
+  for (const candidate of candidates) {
+    let recipe = null;
+    try {
+      recipe = createModelRecipe(candidate.family, info, { ...options, intent, interpretation });
+    } catch {
+      recipe = null;
+    }
+    const validation = recipe ? validateRecipe(recipe, { intent }) : null;
+    // A candidate without a complete, valid recipe is not a suggestion. This
+    // is the boundary that prevents UI null dereferences and prevents registry
+    // defaults or truncated data from being presented as source mathematics.
+    if (!recipe || !validation?.valid) {
+      rejectedRecipes += 1;
+      continue;
+    }
     const leak = evaluateAnswerLeak(recipe, { intent, interpretation });
     const definition = getModelDefinition(candidate.family);
-    return {
+    validSuggestions.push({
       family: candidate.family,
       label: FAMILY_META[candidate.family]?.label ?? definition?.name ?? candidate.family,
       mathematicalPurpose: FAMILY_META[candidate.family]?.purpose ?? definition?.mathematicalPurpose ?? definition?.purpose ?? '',
@@ -1053,8 +1120,14 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
       answerRevealReasons: leak.reasons,
       idealFamily: candidate.idealFamily ?? candidate.family,
       answerProtection: interpretation.answerProtection,
-    };
-  });
+    });
+  }
+  // The legacy matcher and the curriculum-aware matcher can recommend the
+  // same mathematical structure under different family names. Collapse only
+  // exact semantic aliases after recipe validation, so an invalid specific
+  // recipe can still fall back safely to its valid generic counterpart.
+  const suggestions = collapseSemanticEquivalentSuggestions(validSuggestions, info).slice(0, 3);
+  if (rejectedRecipes && !suggestions.length) warnings.push('Model ideas were withheld because their source values were incomplete or could not be rendered truthfully.');
 
   const top = suggestions[0];
   const gap = top ? top.score - (suggestions[1]?.score ?? 0) : 0;
@@ -1079,12 +1152,19 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
     // assessment.  It still carries a calm medium-risk warning; only a
     // completed/worked high-risk model is withheld automatically.
     && top.answerRevealRisk !== 'high';
+  const protectedResponseUnknown = top?.recipe?.unknown
+    && !['question', 'blank', 'answer', 'result'].includes(String(top.recipe.unknown));
+  const responseRecipeIsSafe = !top?.recipe || top.recipe.purpose !== 'response-model'
+    || top.recipe.completionState === 'blank'
+    || top.recipe.scaffoldState === 'blank'
+    || protectedResponseUnknown;
   const safeHighMatch = confidence === 'high'
     && top?.recipe
     && !clarification
     && interpretation.status === 'resolved'
     && !interpretation.needsReview
     && !info.hasExistingRepresentation
+    && responseRecipeIsSafe
     && top.answerRevealRisk !== 'high'
     && (intent !== 'assessment' || assessmentAllowsBlankExplicitResponse);
 
@@ -1094,9 +1174,13 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
     || interpretation.status !== 'resolved'
     || info.hasExistingRepresentation
     || interpretation.needsReview
+    || !responseRecipeIsSafe
     || intelligent.ranked.noModelRecommended;
   if (interpretation.needsReview && top) {
     warnings.push('The mathematical reading needs review, so no model has been attached automatically.');
+  }
+  if (top?.recipe?.purpose === 'response-model' && !responseRecipeIsSafe) {
+    warnings.push('The requested pupil representation has been left as working space instead of being completed automatically.');
   }
   if (!top?.recipe) warnings.push('No model can be matched reliably; leaving the question unmodelled is safest.');
 

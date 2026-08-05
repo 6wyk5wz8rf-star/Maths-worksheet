@@ -473,3 +473,47 @@ test('angle comparators do not print the degree or classification pupils are mea
   assert.doesNotMatch(hidden, /obtuse/);
   assert.match(hidden, />\?</);
 });
+
+test('matched equivalent fractions hide only the requested side-specific slot', () => {
+  const numerator = matchQuestionToModels('Complete: 1/2 = □/8.').provisionalRecipe;
+  const numeratorPupil = renderBuild2Model(numerator, { outputView: 'pupil' });
+  assert.match(numeratorPupil, />1\/2</);
+  assert.match(numeratorPupil, />□\/8</);
+  assert.doesNotMatch(numeratorPupil, />□\/2</);
+
+  const denominator = matchQuestionToModels('Complete: 3/□ = 6/8.').provisionalRecipe;
+  const denominatorPupil = renderBuild2Model(denominator, { outputView: 'pupil' });
+  assert.match(denominatorPupil, />3\/□</);
+  assert.match(denominatorPupil, />6\/8</);
+  assert.doesNotMatch(denominatorPupil, />6\/□</);
+});
+
+test('a matched scaling bar preserves the known original and protects only the result', () => {
+  const recipe = matchQuestionToModels('Calculate 3 times as many as 12.').provisionalRecipe;
+  const pupil = renderBuild2Model(recipe, { outputView: 'pupil' });
+  const answer = renderBuild2Model(recipe, { outputView: 'answer' });
+  assert.match(pupil, />12</);
+  assert.match(pupil, />\?</);
+  assert.match(pupil, /3 times as many/);
+  assert.doesNotMatch(pupil, />36</);
+  assert.match(answer, />36</);
+});
+
+test('a next-day duration keeps the pupil answer hidden and reveals exactly 20 minutes to teachers', () => {
+  const recipe = matchQuestionToModels('How long is it from 11:50 pm to 12:10 am?').provisionalRecipe;
+  const pupil = renderBuild2Model(recipe, { outputView: 'pupil' });
+  const teacher = renderBuild2Model(recipe, { outputView: 'teacher' });
+  assert.match(pupil, /23:50/);
+  assert.match(pupil, /00:10/);
+  assert.match(pupil, /duration: \?/);
+  assert.match(teacher, /20 minutes/);
+});
+
+test('a blank pupil clock is described as blank rather than as a completed time', () => {
+  const recipe = matchQuestionToModels('Draw the hands to show 3:45 pm.').provisionalRecipe;
+  const pupil = renderBuild2Model(recipe, { outputView: 'pupil' });
+  const teacher = renderBuild2Model(recipe, { outputView: 'teacher' });
+  assert.match(pupil, /blank analogue clock face with no time completed/i);
+  assert.doesNotMatch(pupil, /analogue clock at 15:45/i);
+  assert.match(teacher, /analogue clock at 15:45/i);
+});

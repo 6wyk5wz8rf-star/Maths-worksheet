@@ -22,8 +22,9 @@ import {
   duplicateProject as duplicateStoredProject,
   worksheetActions,
   createId,
-} from './state.js?v=release-v4';
-import { paginateWorksheet, mmToPx } from './pagination.js?v=release-v4';
+  reorderInsertionIndex,
+} from './state.js?v=release-v5';
+import { paginateWorksheet, mmToPx } from './pagination.js?v=release-v5';
 import {
   SECTION_ROLES,
   STYLE_PRESETS,
@@ -31,14 +32,14 @@ import {
   footprintForPattern,
   suggestNewQuestionOrder,
   suggestWorksheetArchitecture,
-} from './worksheet-architecture.js?v=release-v4';
+} from './worksheet-architecture.js?v=release-v5';
 import {
   compareVersions,
   createWorkbookCutoutVariant,
   reconcileWorkbookCutoutVariant,
   resolveWorksheetVersion,
-} from './worksheet-versions.js?v=release-v4';
-import { createSafeNumberVariation } from './number-variation.js?v=release-v4';
+} from './worksheet-versions.js?v=release-v5';
+import { createSafeNumberVariation } from './number-variation.js?v=release-v5';
 
 const SAMPLE_TEXT = `Place value
 
@@ -120,11 +121,12 @@ let ui = {
   editingInterpretation: false,
   inspectorOpen: false,
   navigatorOpen: false,
-  reviewOnly: false,
   previousWorksheetVersionId: 'master',
   comparisonVersionId: 'master',
   dragging: null,
   lastPagination: null,
+  renderedGeometryIssues: [],
+  renderedGeometrySignature: '',
 };
 
 let renderedStage = null;
@@ -134,7 +136,6 @@ let panelReturnSelector = null;
 const SCROLL_REGIONS = [
   '.workspace-scroll',
   '.inspector',
-  '.question-navigator',
   '.mobile-navigator-sheet',
   '.model-bank-results',
   '.settings-dialog-body',
@@ -422,6 +423,26 @@ function safeBoundRecipe(match, worksheet, currentModel = null, options = {}) {
   return validation.valid ? withModelBinding(validation.normalizedRecipe, 'bound') : null;
 }
 
+function safeDerivedAnswer(match) {
+  const interpretation = match?.interpretation;
+  const answer = interpretation?.privateDerived?.answer;
+  if (match?.confidence !== 'high'
+    || interpretation?.status !== 'resolved'
+    || interpretation?.needsReview
+    || match?.clarification
+    || answer === null
+    || answer === undefined
+    || (typeof answer === 'number' && !Number.isFinite(answer))) return null;
+  return typeof answer === 'number' || typeof answer === 'string' ? String(answer) : null;
+}
+
+function modelCanReplaceResponseSpace(model, worksheet) {
+  if (!model || model.purpose !== 'response-model') return false;
+  const completion = model.scaffoldState ?? model.completionState ?? 'blank';
+  if (completion !== 'blank') return false;
+  return evaluateAnswerLeak(model, { intent: worksheet.intent }).risk === 'none';
+}
+
 function reanalyseQuestionBlock(block, options = {}) {
   if (!block || block.kind !== 'question') return block;
   const worksheet = store.getState();
@@ -439,6 +460,7 @@ function reanalyseQuestionBlock(block, options = {}) {
       : block.model;
   const mergeWarnings = [...(block.warnings ?? []), ...warningObjects(match.warnings)];
   const warningsByCode = new Map(mergeWarnings.map((warning) => [warning.code, warning]));
+  const derivedAnswer = safeDerivedAnswer(match);
   return {
     ...block,
     extracted: {
@@ -452,6 +474,9 @@ function reanalyseQuestionBlock(block, options = {}) {
       },
     },
     model: nextModel,
+    teacher: block.teacher?.answer == null && derivedAnswer != null
+      ? { ...block.teacher, answer: derivedAnswer }
+      : block.teacher,
     warnings: [...warningsByCode.values()],
   };
 }
@@ -474,7 +499,7 @@ function refreshAutomaticReadingsOnLoad() {
     const model = mayRefreshModel ? safeBoundRecipe(match, worksheet) : block.model;
     let response = block.response;
     if (!response?.teacherChosen && mayRefreshModel) {
-      if (model?.purpose === 'response-model') response = createResponseRecipe({ type: 'none', size: 'compact' });
+      if (modelCanReplaceResponseSpace(model, worksheet)) response = createResponseRecipe({ type: 'none', size: 'compact' });
       else if (response?.type === 'none') response = responseForQuestion(block, worksheet.intent);
     }
     const extracted = {
@@ -487,9 +512,13 @@ function refreshAutomaticReadingsOnLoad() {
         needsReview: Boolean(match.interpretation?.needsReview || match.confidence !== 'high' || match.clarification),
       },
     };
-    const next = { ...block, extracted, model, response };
-    if (JSON.stringify({ extracted: block.extracted, model: block.model, response: block.response })
-      !== JSON.stringify({ extracted, model, response })) changed = true;
+    const derivedAnswer = safeDerivedAnswer(match);
+    const teacher = block.teacher?.answer == null && derivedAnswer != null
+      ? { ...block.teacher, answer: derivedAnswer }
+      : block.teacher;
+    const next = { ...block, extracted, model, response, teacher };
+    if (JSON.stringify({ extracted: block.extracted, model: block.model, response: block.response, teacher: block.teacher })
+      !== JSON.stringify({ extracted, model, response, teacher })) changed = true;
     return next;
   });
   const refreshedWorksheet = { ...worksheet, blocks };
@@ -523,6 +552,7 @@ function buildFirstDraft() {
       }) : null);
     const warningList = [...(block.warnings ?? []), ...warningObjects(match.warnings)];
     const warnings = [...new Map(warningList.map((warning) => [warning.code, warning])).values()];
+    const derivedAnswer = safeDerivedAnswer(match);
     return {
       ...block,
       extracted: {
@@ -536,9 +566,12 @@ function buildFirstDraft() {
         },
       },
       model,
+      teacher: block.teacher?.answer == null && derivedAnswer != null
+        ? { ...block.teacher, answer: derivedAnswer }
+        : block.teacher,
       response: alreadyComposed
         ? block.response
-        : model?.purpose === 'response-model'
+        : modelCanReplaceResponseSpace(model, worksheet)
           ? createResponseRecipe({ type: 'none', size: 'compact' })
           : responseForQuestion(block, worksheet.intent),
       warnings,
@@ -555,7 +588,6 @@ function buildFirstDraft() {
   ui.selectedId = null;
   ui.inspectorOpen = false;
   ui.navigatorOpen = false;
-  ui.reviewOnly = false;
   ui.stage = 'make';
   clearDraft();
   render();
@@ -817,6 +849,7 @@ function safeRecipeForPreview(recipe, intent = store.getState().intent) {
 }
 
 function modelSuggestionCard(suggestion, label = null, instanceId = 'preview') {
+  if (!suggestion?.recipe?.family) return '';
   const recipe = createRegistryRecipe(suggestion.recipe.family, suggestion.recipe);
   const preview = renderModelPreview(safeRecipeForPreview(recipe), { intent: store.getState().intent, instanceId: `${instanceId}-${recipe.family}` });
   return `<button type="button" class="suggestion-card" draggable="true" data-action="attach-model" data-family="${recipe.family}" data-drag-family="${recipe.family}">
@@ -846,11 +879,6 @@ function manualRecipeFor(family, block) {
 function renderAttachedModel(block, worksheet) {
   const model = block.model;
   const definition = getModelDefinition(model.family);
-  const build2 = Boolean(getBuild2ModelDefinition(model.family));
-  const scaffold = build2 ? (model.scaffoldState ?? 'guided') : model.completionState;
-  const completionChoices = build2
-    ? [['blank', 'Blank'], ['guided', 'Guided'], ['modelled', 'Modelled']]
-    : [['blank', 'Blank'], ['partly-completed', 'Partly'], ['completed', 'Completed']];
   const validation = validateRecipe(model, { intent: worksheet.intent });
   const warnings = [...validation.warnings, ...validation.errors];
   return `<section class="inspector-section model-controls">
@@ -868,45 +896,11 @@ function renderAttachedModel(block, worksheet) {
     </div>
     ${warnings.length ? `<div class="warning-card"><strong>${validation.valid ? 'Check this model' : 'Cannot show safely'}</strong><span>${escapeHtml(warnings[0].message)}</span></div>` : ''}
     ${worksheet.intent === 'assessment' && (model.completionState !== 'blank' || isAnswerRevealRisk(model, { intent: worksheet.intent })) ? `<div class="warning-card"><strong>Assessment check</strong><span>This model may reveal a method, relationship or answer. Keep it only if that support is intentional.</span></div>` : ''}
-    <details class="inspector-disclosure">
-      <summary>Exact model settings</summary>
-      <div class="inspector-disclosure-body">
-        <div class="field"><label for="model-completion-select">What pupils see</label><select id="model-completion-select" data-role="model-option-select" data-key="${build2 ? 'scaffoldState' : 'completionState'}">${completionChoices.map(([value, label]) => `<option value="${value}" ${scaffold === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
-        <div class="field"><label>Mathematical values</label><div class="field-grid">${(definition?.editorFields ?? []).filter((field) => !['size', 'completionState', 'scaffoldState', 'purpose', 'position'].includes(field.key)).map((field) => renderEditorField(field, model)).join('')}</div></div>
-        <div class="field"><label for="model-purpose-select">Use</label><select id="model-purpose-select" data-role="model-option-select" data-key="purpose"><option value="question-information" ${model.purpose === 'question-information' ? 'selected' : ''}>Question information</option><option value="thinking-model" ${model.purpose === 'thinking-model' ? 'selected' : ''}>Thinking support</option><option value="response-model" ${model.purpose === 'response-model' ? 'selected' : ''}>Pupil completes it</option><option value="worked-example" ${model.purpose === 'worked-example' ? 'selected' : ''}>Worked example</option></select></div>
-        <div class="field"><label for="model-position-select">Position</label><select id="model-position-select" data-role="model-option-select" data-key="position">${['above', 'beneath', 'beside'].map((value) => `<option value="${value}" ${model.position === value ? 'selected' : ''}>${humanOption(value)}</option>`).join('')}</select></div>
-        <div class="switch-row">
-          <span>${modelBindingMode(model) === 'bound' ? 'Linked to question' : 'Detached model'}<small class="field-hint">${modelBindingMode(model) === 'bound' ? ' Values update when the wording or reading changes.' : ' Custom values stay independent.'}</small></span>
-          <label class="switch"><input type="checkbox" aria-label="Linked to question" data-role="model-binding-toggle" ${modelBindingMode(model) === 'bound' ? 'checked' : ''}><span></span></label>
-        </div>
-        <div class="switch-row">
-          <span>Complete this model in the teacher version</span>
-          <label class="switch"><input type="checkbox" aria-label="Complete this model in the teacher version" data-role="teacher-model-toggle" ${block.teacher.completedModel ? 'checked' : ''}><span></span></label>
-        </div>
-        <button type="button" class="ghost full-width" data-action="apply-similar-model">Use for compatible questions</button>
-      </div>
-    </details>
   </section>`;
 }
 
 function renderResponseControls(block) {
   const response = block.response ?? createResponseRecipe();
-  const options = [
-    ['none', 'None'],
-    ['short-answer', 'Answer line'],
-    ['answer-box', 'Answer box'],
-    ['calculation-area', 'Calculation area'],
-    ['squared-working', 'Squared working'],
-    ['lined-explanation', 'Explain in lines'],
-    ['unlined-thinking', 'Thinking space'],
-    ['two-methods', 'Show two methods'],
-    ['prove-it', 'Prove it space'],
-    ['table-completion', 'Table completion'],
-    ['diagram-construction', 'Diagram or graph'],
-    ['labelled-steps', 'Labelled steps'],
-    ['rough-working', 'Rough working'],
-    ['model-completion', 'Pupil completion model'],
-  ];
   const size = ({ compact: 'small', standard: 'medium', generous: 'large' })[response.size] ?? response.size ?? 'medium';
   return `<section class="inspector-section">
     <div class="field full">
@@ -918,47 +912,89 @@ function renderResponseControls(block) {
         <option value="large" ${response.type !== 'none' && size === 'large' ? 'selected' : ''}>Large</option>
       </select>
     </div>
-    <details class="inspector-disclosure">
-      <summary>Working-space type</summary>
-      <div class="inspector-disclosure-body">
-        <div class="field full"><label for="response-type">Type</label><select id="response-type" data-role="response-type">${options.map(([value, label]) => `<option value="${value}" ${response.type === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
-        ${response.type !== 'none' ? `<div class="field"><label for="response-custom-rows">Exact rows <span class="field-hint">(optional)</span></label><input id="response-custom-rows" data-role="response-custom-rows" type="number" min="0" max="14" value="${Number(response.customRows) || ''}" placeholder="Automatic"></div>` : ''}
-      </div>
-    </details>
   </section>`;
 }
 
 function renderCompositionControls(block, worksheet) {
   const composition = block.composition ?? {};
-  const patterns = [
-    ['compact-question', 'Compact question'],
-    ['question-with-working', 'Question with working'],
-    ['question-with-model', 'Question with model'],
-    ['large-model', 'Question with large model'],
-    ['reasoning', 'Reasoning question'],
-    ['problem-solving', 'Problem-solving question'],
-    ['compare-methods', 'Compare two methods'],
-    ['worked-example', 'Worked example'],
-    ['pupil-completion', 'Pupil completion model'],
-    ['data', 'Data question'],
-    ['multi-part', 'Multi-part question'],
-    ['challenge', 'Challenge question'],
-  ];
-  const currentSection = block.section ?? '';
-  const sections = worksheet.architecture?.sections ?? [];
   return `<section class="inspector-section composition-controls">
     <div class="field"><label for="question-spacing">Question spacing</label><select id="question-spacing" data-role="footprint-select"><option value="compact" ${composition.footprint === 'compact' ? 'selected' : ''}>Tight</option><option value="standard" ${!['compact', 'spacious'].includes(composition.footprint) ? 'selected' : ''}>Normal</option><option value="spacious" ${composition.footprint === 'spacious' ? 'selected' : ''}>More room</option></select></div>
-    <details class="inspector-disclosure">
-      <summary>Exact page placement</summary>
-      <div class="inspector-disclosure-body">
+  </section>`;
+}
+
+function renderAdvancedQuestionControls(block, worksheet) {
+  const model = block.model;
+  const definition = model ? getModelDefinition(model.family) : null;
+  const build2 = Boolean(model && getBuild2ModelDefinition(model.family));
+  const scaffold = model ? (build2 ? (model.scaffoldState ?? 'guided') : model.completionState) : null;
+  const completionChoices = build2
+    ? [['blank', 'Blank'], ['guided', 'Guided'], ['modelled', 'Modelled']]
+    : [['blank', 'Blank'], ['partly-completed', 'Partly'], ['completed', 'Completed']];
+  const response = block.response ?? createResponseRecipe();
+  const responseOptions = [
+    ['none', 'None'], ['short-answer', 'Answer line'], ['answer-box', 'Answer box'],
+    ['calculation-area', 'Calculation area'], ['squared-working', 'Squared working'],
+    ['lined-explanation', 'Explain in lines'], ['unlined-thinking', 'Thinking space'],
+    ['two-methods', 'Show two methods'], ['prove-it', 'Prove it space'],
+    ['table-completion', 'Table completion'], ['diagram-construction', 'Diagram or graph'],
+    ['labelled-steps', 'Labelled steps'], ['rough-working', 'Rough working'],
+    ['model-completion', 'Pupil completion model'],
+  ];
+  const patterns = [
+    ['compact-question', 'Compact question'], ['question-with-working', 'Question with working'],
+    ['question-with-model', 'Question with model'], ['large-model', 'Question with large model'],
+    ['reasoning', 'Reasoning question'], ['problem-solving', 'Problem-solving question'],
+    ['compare-methods', 'Compare two methods'], ['worked-example', 'Worked example'],
+    ['pupil-completion', 'Pupil completion model'], ['data', 'Data question'],
+    ['multi-part', 'Multi-part question'], ['challenge', 'Challenge question'],
+  ];
+  const composition = block.composition ?? {};
+  const sections = worksheet.architecture?.sections ?? [];
+  const index = worksheet.blocks.findIndex((item) => item.id === block.id);
+  const breakSet = new Set(worksheet.pageArrangement.manualBreakBefore);
+  return `<details class="inspector-section inspector-disclosure advanced-question-controls">
+    <summary>Advanced</summary>
+    <div class="inspector-disclosure-body">
+      ${model ? `<section class="advanced-control-group">
+        <h3>Model details</h3>
+        <div class="field"><label for="model-completion-select">What pupils see</label><select id="model-completion-select" data-role="model-option-select" data-key="${build2 ? 'scaffoldState' : 'completionState'}">${completionChoices.map(([value, label]) => `<option value="${value}" ${scaffold === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+        <div class="field"><label>Mathematical values</label><div class="field-grid">${(definition?.editorFields ?? []).filter((field) => !['size', 'completionState', 'scaffoldState', 'purpose', 'position'].includes(field.key)).map((field) => renderEditorField(field, model)).join('')}</div></div>
+        <div class="field"><label for="model-purpose-select">Use</label><select id="model-purpose-select" data-role="model-option-select" data-key="purpose"><option value="question-information" ${model.purpose === 'question-information' ? 'selected' : ''}>Question information</option><option value="thinking-model" ${model.purpose === 'thinking-model' ? 'selected' : ''}>Thinking support</option><option value="response-model" ${model.purpose === 'response-model' ? 'selected' : ''}>Pupil completes it</option><option value="worked-example" ${model.purpose === 'worked-example' ? 'selected' : ''}>Worked example</option></select></div>
+        <div class="field"><label for="model-position-select">Position</label><select id="model-position-select" data-role="model-option-select" data-key="position">${['above', 'beneath', 'beside'].map((value) => `<option value="${value}" ${model.position === value ? 'selected' : ''}>${humanOption(value)}</option>`).join('')}</select></div>
+        <div class="switch-row"><span>${modelBindingMode(model) === 'bound' ? 'Linked to question' : 'Detached model'}<small class="field-hint">${modelBindingMode(model) === 'bound' ? ' Values update with the reading.' : ' Custom values stay independent.'}</small></span><label class="switch"><input type="checkbox" aria-label="Linked to question" data-role="model-binding-toggle" ${modelBindingMode(model) === 'bound' ? 'checked' : ''}><span></span></label></div>
+        <div class="switch-row"><span>Complete in teacher version</span><label class="switch"><input type="checkbox" aria-label="Complete this model in the teacher version" data-role="teacher-model-toggle" ${block.teacher.completedModel ? 'checked' : ''}><span></span></label></div>
+        <button type="button" class="ghost full-width" data-action="apply-similar-model">Use for compatible questions</button>
+      </section>` : ''}
+      <section class="advanced-control-group">
+        <h3>Working space details</h3>
+        <div class="field full"><label for="response-type">Type</label><select id="response-type" data-role="response-type">${responseOptions.map(([value, label]) => `<option value="${value}" ${response.type === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+        ${response.type !== 'none' ? `<div class="field"><label for="response-custom-rows">Exact rows <span class="field-hint">(optional)</span></label><input id="response-custom-rows" data-role="response-custom-rows" type="number" min="0" max="14" value="${Number(response.customRows) || ''}" placeholder="Automatic"></div>` : ''}
+      </section>
+      <section class="advanced-control-group">
+        <h3>Wording and teacher notes</h3>
+        <div class="field"><label for="selected-display-text">Printed wording</label><textarea id="selected-display-text" data-role="question-display">${escapeHtml(block.displayText)}</textarea></div>
+        <div class="field"><label for="block-hint">Brief hint</label><input id="block-hint" data-role="block-composition-text" data-key="hint" value="${escapeAttr(composition.hint ?? '')}" placeholder="Only where it helps"></div>
+        <div class="field"><label for="block-stem">Sentence stem</label><input id="block-stem" data-role="block-composition-text" data-key="sentenceStem" value="${escapeAttr(composition.sentenceStem ?? '')}" placeholder="I know this because…"></div>
+        <div class="field"><label for="block-vocabulary">Vocabulary cue</label><input id="block-vocabulary" data-role="block-composition-text" data-key="vocabulary" value="${escapeAttr((composition.vocabulary ?? []).join(', '))}" placeholder="e.g. value, interval"></div>
+        <button type="button" class="ghost full-width" data-action="vary-numbers">Create a safe value variation</button>
+        <div class="field"><label for="teacher-answer">Answer (only if known)</label><input id="teacher-answer" data-role="teacher-answer" value="${escapeAttr(block.teacher.answer ?? '')}" placeholder="Leave unresolved if uncertain"></div>
+        <div class="field"><label for="teacher-method">Expected method</label><input id="teacher-method" data-role="teacher-field" data-key="expectedMethod" value="${escapeAttr(block.teacher.expectedMethod ?? '')}" placeholder="Optional"></div>
+        <div class="field"><label for="teacher-misconception">Common misconception</label><input id="teacher-misconception" data-role="teacher-field" data-key="misconception" value="${escapeAttr(block.teacher.misconception ?? '')}" placeholder="Optional"></div>
+        <div class="field"><label for="teacher-notes">Short note</label><textarea id="teacher-notes" data-role="teacher-notes" placeholder="Optional teaching note">${escapeHtml(block.teacher.notes ?? '')}</textarea></div>
+        <div class="field"><label for="teacher-marking">Marking note</label><textarea id="teacher-marking" data-role="teacher-field" data-key="markingNote" placeholder="Optional">${escapeHtml(block.teacher.markingNote ?? '')}</textarea></div>
+      </section>
+      <section class="advanced-control-group">
+        <h3>Placement</h3>
         <div class="field"><label for="block-pattern">Question type</label><select id="block-pattern" data-role="block-pattern">${patterns.map(([value, label]) => `<option value="${value}" ${composition.pattern === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
         <div class="field"><label for="question-width">Width</label><select id="question-width" data-role="footprint-select"><option value="standard" ${!['half', 'full', 'page'].includes(composition.footprint) ? 'selected' : ''}>Automatic</option><option value="half" ${composition.footprint === 'half' ? 'selected' : ''}>Two-column item</option><option value="full" ${composition.footprint === 'full' ? 'selected' : ''}>Full width</option><option value="page" ${composition.footprint === 'page' ? 'selected' : ''}>Own page</option></select></div>
         <div class="field"><label for="manual-number">Manual number <span class="field-hint">(for example 4a)</span></label><input id="manual-number" data-role="manual-number" value="${escapeAttr(block.manualNumber ?? '')}" placeholder="Automatic"></div>
-        ${sections.length ? `<div class="field"><label for="block-section">Section</label><select id="block-section" data-role="block-section">${sections.map((section) => `<option value="${escapeAttr(section.id)}" ${currentSection === section.id ? 'selected' : ''}>${escapeHtml(section.name)}</option>`).join('')}</select></div>` : ''}
+        ${sections.length ? `<div class="field"><label for="block-section">Section</label><select id="block-section" data-role="block-section">${sections.map((section) => `<option value="${escapeAttr(section.id)}" ${block.section === section.id ? 'selected' : ''}>${escapeHtml(section.name)}</option>`).join('')}</select></div>` : ''}
         <div class="switch-row"><span>Keep with next block</span><label class="switch"><input type="checkbox" aria-label="Keep with next block" data-role="keep-with-next" ${composition.keepWithNext || block.layout?.keepWithNext ? 'checked' : ''}><span></span></label></div>
-      </div>
-    </details>
-  </section>`;
+        <div class="choice-grid"><button type="button" class="choice-button" data-action="move-block" data-id="${block.id}" data-direction="up" ${index === 0 ? 'disabled' : ''}>↑ Move up</button><button type="button" class="choice-button" data-action="move-block" data-id="${block.id}" data-direction="down" ${index === worksheet.blocks.length - 1 ? 'disabled' : ''}>↓ Move down</button><button type="button" class="choice-button" data-action="move-page" data-id="${block.id}" data-direction="previous">Previous page</button><button type="button" class="choice-button" data-action="move-page" data-id="${block.id}" data-direction="next">Next page</button></div>
+        <div class="switch-row"><span>Start on a new page</span><label class="switch"><input type="checkbox" aria-label="Start this block on a new page" data-role="manual-break" ${breakSet.has(block.id) ? 'checked' : ''}><span></span></label></div>
+      </section>
+    </div>
+  </details>`;
 }
 
 function isBuild2Model(family) {
@@ -1014,21 +1050,22 @@ function renderModelBankPicker(block) {
 
 function renderModelChoices(block, worksheet) {
   const match = matchForBlock(block, worksheet);
-  const suggestions = match.suggestions.slice(0, 2);
+  const suggestions = match.suggestions.filter((suggestion) => suggestion?.recipe?.family).slice(0, 2);
+  const missingReferencedVisual = match.interpretation?.status === 'needs-referenced-visual';
   if (ui.browseModels) return renderModelBankPicker(block);
   return `<section class="inspector-section">
     <h3>Model</h3>
-    <p>${match.confidence === 'high' ? 'Choose a different representation if it suits your teaching better.' : 'Nothing was assumed. Choose a model only if it matches the intended question.'}</p>
+    <p>${match.confidence === 'high' && !match.noModelRecommended ? 'Choose a different representation if it suits your teaching better.' : 'Nothing was assumed. Choose a model only if it matches the intended question.'}</p>
     ${match.clarification ? `<div class="clarify-card"><strong>One quick check</strong><span>${escapeHtml(match.clarification)}</span><div class="clarify-actions"><button type="button" data-action="resolve-division" data-value="sharing">Sharing between groups</button><button type="button" data-action="resolve-division" data-value="grouping">Making groups of this size</button></div></div>` : ''}
     ${match.warnings.length ? `<div class="warning-card"><strong>Worth noticing</strong><span>${escapeHtml(match.warnings[0])}</span></div>` : ''}
     <div class="suggestion-list">
-      ${suggestions.map((suggestion, index) => modelSuggestionCard(suggestion, index === 0 ? `Suggested · ${suggestion.label}` : `Alternative · ${suggestion.label}`, `suggestion-${block.id}-${index}`)).join('')}
+      ${suggestions.map((suggestion, index) => modelSuggestionCard(match.noModelRecommended ? { ...suggestion, confidence: null } : suggestion, index === 0 ? `Suggested · ${suggestion.label}` : `Alternative · ${suggestion.label}`, `suggestion-${block.id}-${index}`)).join('')}
       <button type="button" class="suggestion-card" data-action="remove-model">
         <span class="suggestion-preview"><span style="font-size:24px;color:#777">∅</span></span>
         <span class="suggestion-copy"><strong>No model</strong><span>${escapeHtml(match.noModelOption.reason)}</span>${match.noModelRecommended ? '<span class="confidence">Recommended</span>' : ''}</span>
       </button>
     </div>
-    <button type="button" class="ghost full-width" data-action="browse-models" style="margin-top:8px">Choose another model</button>
+    ${missingReferencedVisual ? '' : '<button type="button" class="ghost full-width" data-action="browse-models" style="margin-top:8px">Choose another model</button>'}
   </section>`;
 }
 
@@ -1059,10 +1096,18 @@ function renderInterpretationControls(block, worksheet) {
   const interpretation = block.extracted?.interpretation ?? match.interpretation;
   const needsReview = Boolean(interpretation?.needsReview || match.confidence !== 'high' || match.clarification);
   if (!needsReview) return '';
+  const missingReferencedVisual = interpretation?.status === 'needs-referenced-visual';
+  const reviewLabel = missingReferencedVisual ? 'Source check' : 'Needs a glance';
+  const reviewSummary = missingReferencedVisual
+    ? 'Referenced visual missing; no replacement invented.'
+    : describeQuestionReading(interpretation);
+  const reviewDetail = missingReferencedVisual
+    ? 'Add the original clock, chart, table or diagram again, or choose a replacement only if you can reproduce it exactly.'
+    : block.model ? 'Check that the model matches the question.' : 'No model was added automatically because the reading was not certain enough.';
   return `<section class="inspector-section interpretation-panel needs-review">
-    <div class="reading-review-copy"><small>Needs a glance</small><strong>${escapeHtml(describeQuestionReading(interpretation))}</strong><span>${block.model ? 'Check that the model matches the question.' : 'No model was added automatically because the reading was not certain enough.'}</span></div>
+    <div class="reading-review-copy"><small>${reviewLabel}</small><strong>${escapeHtml(reviewSummary)}</strong><span>${escapeHtml(reviewDetail)}</span></div>
     ${match.clarification ? `<div class="clarify-card"><strong>Which structure is intended?</strong><span>${escapeHtml(match.clarification)}</span><div class="clarify-actions"><button type="button" data-action="resolve-division" data-value="sharing">Sharing equally</button><button type="button" data-action="resolve-division" data-value="grouping">Making equal groups</button></div></div>` : ''}
-    <div class="quiet-actions reading-review-actions"><button type="button" data-action="browse-models">Choose model</button>${block.model ? '<button type="button" data-action="remove-model">Keep text only</button>' : ''}</div>
+    <div class="quiet-actions reading-review-actions"><button type="button" data-action="browse-models">${missingReferencedVisual ? 'Choose replacement manually' : 'Choose model'}</button>${block.model ? '<button type="button" data-action="remove-model">Keep text only</button>' : ''}</div>
   </section>`;
 }
 
@@ -1086,28 +1131,8 @@ function renderInspector(worksheet) {
     ${block.model && !ui.browseModels ? renderAttachedModel(block, worksheet) : renderModelChoices(block, worksheet)}
     ${renderResponseControls(block)}
     ${renderCompositionControls(block, worksheet)}
-    <details class="inspector-section inspector-disclosure">
-      <summary>More question options</summary>
-      <div class="inspector-disclosure-body">
-        <div class="field"><label for="selected-display-text">Printed wording</label><textarea id="selected-display-text" data-role="question-display">${escapeHtml(block.displayText)}</textarea></div>
-        <div class="field"><label for="block-hint">Brief hint</label><input id="block-hint" data-role="block-composition-text" data-key="hint" value="${escapeAttr(block.composition?.hint ?? '')}" placeholder="Only where it helps"></div>
-        <div class="field"><label for="block-stem">Sentence stem</label><input id="block-stem" data-role="block-composition-text" data-key="sentenceStem" value="${escapeAttr(block.composition?.sentenceStem ?? '')}" placeholder="I know this because…"></div>
-        <div class="field"><label for="block-vocabulary">Vocabulary cue</label><input id="block-vocabulary" data-role="block-composition-text" data-key="vocabulary" value="${escapeAttr((block.composition?.vocabulary ?? []).join(', '))}" placeholder="e.g. value, interval"></div>
-        <button type="button" class="ghost full-width" data-action="vary-numbers">Create a safe value variation</button>
-      </div>
-    </details>
-    <details class="inspector-section inspector-disclosure">
-      <summary>Teacher version</summary>
-      <div class="inspector-disclosure-body field-grid">
-        <div class="field full"><label for="teacher-answer">Answer (only if known)</label><input id="teacher-answer" data-role="teacher-answer" value="${escapeAttr(block.teacher.answer ?? '')}" placeholder="Leave unresolved if uncertain"></div>
-        <div class="field full"><label for="teacher-method">Expected method</label><input id="teacher-method" data-role="teacher-field" data-key="expectedMethod" value="${escapeAttr(block.teacher.expectedMethod ?? '')}" placeholder="Optional"></div>
-        <div class="field full"><label for="teacher-misconception">Common misconception</label><input id="teacher-misconception" data-role="teacher-field" data-key="misconception" value="${escapeAttr(block.teacher.misconception ?? '')}" placeholder="Optional"></div>
-        <div class="field full"><label for="teacher-notes">Short note</label><textarea id="teacher-notes" data-role="teacher-notes" placeholder="Optional teaching note">${escapeHtml(block.teacher.notes ?? '')}</textarea></div>
-        <div class="field full"><label for="teacher-marking">Marking note</label><textarea id="teacher-marking" data-role="teacher-field" data-key="markingNote" placeholder="Optional">${escapeHtml(block.teacher.markingNote ?? '')}</textarea></div>
-      </div>
-    </details>
-    ${activeOverride ? `<button type="button" class="ghost full-width" data-action="reset-version-block" data-id="${block.id}">Reset this question to Standard</button>` : ''}
-    ${renderBlockOrderControls(block, worksheet)}
+    ${renderAdvancedQuestionControls(block, worksheet)}
+    ${activeOverride ? `<button type="button" class="ghost full-width" data-action="reset-version-block" data-id="${block.id}">${isWorkbookSheet(worksheet) ? 'Undo workbook-only changes' : 'Reset this question to Standard'}</button>` : ''}
   </div>`;
 }
 
@@ -1141,15 +1166,14 @@ function isWorkbookSheet(worksheet) {
 function renderNavigator(worksheet) {
   const pagination = ui.lastPagination ?? paginateWorksheet(worksheet, { outputView: worksheet.outputView });
   const allQuestions = worksheet.blocks.filter((block) => block.kind === 'question');
-  const visibleBlocks = ui.reviewOnly ? worksheet.blocks.filter(questionNeedsReview) : worksheet.blocks;
-  const title = ui.reviewOnly ? 'Questions to check' : 'Questions';
-  return `<div id="mobile-question-navigator" role="region" aria-labelledby="mobile-question-navigator-title" tabindex="-1" class="mobile-navigator-sheet ${ui.navigatorOpen ? 'is-open' : ''}">
-    <div class="panel-header"><h2 id="mobile-question-navigator-title">${title}</h2><span class="panel-count">${ui.reviewOnly ? visibleBlocks.length : allQuestions.length}</span><button type="button" class="tool-button" data-action="close-mobile-panels" aria-label="Close questions panel">×</button></div>
+  const visibleBlocks = worksheet.blocks;
+  return `<div id="mobile-question-navigator" role="dialog" aria-modal="${ui.navigatorOpen}" aria-labelledby="mobile-question-navigator-title" tabindex="-1" class="mobile-navigator-sheet ${ui.navigatorOpen ? 'is-open' : ''}">
+    <div class="panel-header"><h2 id="mobile-question-navigator-title">Questions</h2><span class="panel-count">${allQuestions.length}</span><button type="button" class="tool-button" data-action="close-mobile-panels" aria-label="Close questions panel">×</button></div>
     <div class="navigator-list">
       ${visibleBlocks.length ? visibleBlocks.map((block) => {
         const warning = block.warnings?.length;
         return `<button type="button" class="navigator-item ${ui.selectedId === block.id ? 'is-selected' : ''}" data-action="select-block" data-id="${block.id}" ${ui.selectedId === block.id ? 'aria-current="true"' : ''}>
-          <span class="nav-number">${block.kind === 'question' ? block.number ?? '•' : '§'}</span>
+          <span class="nav-number">${block.kind === 'question' ? block.number ?? '•' : ''}</span>
           <span class="nav-copy"><strong>${escapeHtml(block.displayText)}</strong><span class="nav-meta"><span class="nav-dot ${warning ? 'warning' : block.model ? '' : 'none'}"></span>${block.kind !== 'question' ? humanOption(block.kind) : block.model ? getModelDefinition(block.model.family)?.name : 'No model'}</span></span>
         </button>`;
       }).join('') : '<p class="navigator-empty">Everything was read with high confidence.</p>'}
@@ -1182,13 +1206,13 @@ function renderResponseSpace(block, placement) {
   if (response.type === 'unlined-thinking') return `<div class="response-space response-thinking" style="${style}" aria-label="Open thinking space"><span>${escapeHtml(response.label || 'Show your thinking')}</span></div>`;
   if (response.type === 'two-methods') return `<div class="response-space response-two-methods" style="${style}" aria-label="Two method spaces"><div><small>Method 1</small></div><div><small>Method 2</small></div></div>`;
   if (response.type === 'table-completion') {
-    const rows = Math.max(2, Number(response.rows) || 4);
+    const rows = Math.max(2, Number(response.customRows) || Number(response.rows) || 4);
     const columns = Math.max(2, Math.min(5, Number(response.columns) || 3));
     return `<div class="response-space response-table" style="${style}" aria-label="Table completion space">${Array.from({ length: rows }, () => `<div>${Array.from({ length: columns }, () => '<span></span>').join('')}</div>`).join('')}</div>`;
   }
   if (response.type === 'diagram-construction') return `<div class="response-space response-diagram" style="${style}" aria-label="Diagram construction space"><span>${escapeHtml(response.label || 'Construct your diagram')}</span></div>`;
   if (response.type === 'labelled-steps') {
-    const rows = Math.max(2, Number(response.rows) || 4);
+    const rows = Math.max(2, Number(response.customRows) || Number(response.rows) || 4);
     return `<div class="response-space response-steps" style="${style}" aria-label="Labelled steps">${Array.from({ length: rows }, (_, index) => `<div><b>${index + 1}</b><span></span></div>`).join('')}</div>`;
   }
   if (response.type === 'model-completion') return `<div class="response-space response-model-space" style="${style}" aria-label="Model completion space"></div>`;
@@ -1227,8 +1251,8 @@ function renderWorksheetBlock(block, placement, worksheet, outputView, context =
   const selectedClass = context === 'editor' && ui.selectedId === block.id ? 'is-selected' : '';
   if (block.kind === 'heading') {
     const role = block.sectionMeta?.role ?? 'custom';
-    const roleIcon = { fluency: '•', 'guided-practice': '→', reasoning: '↗', 'problem-solving': '◇', challenge: '+', reflection: '↺' }[role] ?? '§';
-    return `<section class="question-block section-block section-${escapeAttr(role)} ${selectedClass}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}" ${context === 'editor' ? 'tabindex="-1"' : ''}><span aria-hidden="true">${roleIcon}</span>${escapeHtml(block.displayText)}</section>`;
+    const roleIcon = { fluency: '•', 'guided-practice': '→', reasoning: '↗', 'problem-solving': '◇', challenge: '+', reflection: '↺' }[role] ?? '';
+    return `<section class="question-block section-block section-${escapeAttr(role)} ${selectedClass}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}" ${context === 'editor' ? 'tabindex="-1"' : ''}>${roleIcon ? `<span aria-hidden="true">${roleIcon}</span>` : ''}${escapeHtml(block.displayText)}</section>`;
   }
   if (block.kind === 'instruction') {
     return `<section class="question-block instruction-block ${selectedClass}" style="${style}" data-block-id="${block.id}" data-page="${placement.page}" ${context === 'editor' ? 'tabindex="-1"' : ''}><p class="question-copy">${escapeHtml(block.displayText)}</p></section>`;
@@ -1325,7 +1349,9 @@ function renderPageStack(worksheet, outputView, context = 'editor', preparedPagi
 
 function renderMake() {
   const worksheet = store.getState();
-  const pagination = paginateWorksheet(worksheet, { outputView: worksheet.outputView });
+  // Editing is always pupil-safe. Teacher and answer output are transient
+  // print choices and must never leak back into the everyday worksheet view.
+  const pagination = paginateWorksheet(worksheet, { outputView: 'pupil' });
   ui.lastPagination = pagination;
   if (ui.selectedId && !worksheet.blocks.some((block) => block.id === ui.selectedId)) ui.selectedId = null;
   const questionCount = worksheet.blocks.filter((block) => block.kind === 'question').length;
@@ -1335,7 +1361,7 @@ function renderMake() {
   return `<section class="make-stage" aria-label="Worksheet maker">
     <div class="make-toolbar" data-screen-only>
       <div class="project-title-wrap">
-        <input class="project-title-input" data-role="project-title" value="${escapeAttr(worksheet.metadata.name)}" aria-label="Worksheet project name">
+        <input class="project-title-input" data-role="project-title" value="${escapeAttr(worksheet.metadata.title || worksheet.metadata.name)}" aria-label="Worksheet title">
         ${saveStateMarkup()}
       </div>
       <div class="toolbar-group">
@@ -1343,22 +1369,21 @@ function renderMake() {
           <button type="button" data-action="set-sheet-format" data-value="worksheet" class="${!workbook ? 'is-selected' : ''}" aria-pressed="${!workbook}">Worksheet</button>
           <button type="button" data-action="set-sheet-format" data-value="workbook" class="${workbook ? 'is-selected' : ''}" aria-pressed="${workbook}">Workbook cut-outs</button>
         </div>
-        <button type="button" class="toolbar-text-button" data-action="open-navigator" aria-controls="mobile-question-navigator" aria-expanded="${ui.navigatorOpen}">Questions <span>${questionCount}</span></button>
-        ${reviewCount ? `<button type="button" class="toolbar-text-button review-button" data-action="open-review" aria-controls="mobile-question-navigator">Check reading <span>${reviewCount}</span></button>` : ''}
+        <button type="button" class="toolbar-text-button ${reviewCount ? 'review-button' : ''}" data-action="open-navigator" aria-controls="mobile-question-navigator" aria-expanded="${ui.navigatorOpen}">Questions <span>${questionCount}${reviewCount ? ` · ${reviewCount} to check` : ''}</span></button>
         <span class="page-status ${workbookWarning ? 'has-warning' : ''}">${pagination.pageCount} ${pagination.pageCount === 1 ? 'page' : 'pages'}${workbookWarning ? ' · does not fit safely' : ''}</span>
       </div>
     </div>
     <div class="make-layout">
       <div class="workspace-scroll" aria-label="A4 worksheet preview">
-        ${renderPageStack(worksheet, worksheet.outputView, 'editor', pagination)}
+        ${renderPageStack(worksheet, 'pupil', 'editor', pagination)}
       </div>
-      <aside id="question-inspector" class="inspector ${ui.inspectorOpen ? 'is-open' : ''}" role="region" aria-labelledby="question-inspector-title" tabindex="-1">
+      <aside id="question-inspector" class="inspector ${ui.inspectorOpen ? 'is-open' : ''}" role="dialog" aria-modal="${ui.inspectorOpen}" aria-labelledby="question-inspector-title" tabindex="-1">
         <div class="panel-header"><h2 id="question-inspector-title">Adjust question</h2><button type="button" class="tool-button" data-action="close-mobile-panels" aria-label="Close question controls">×</button></div>
         ${renderInspector(worksheet)}
       </aside>
     </div>
     ${renderNavigator(worksheet)}
-    ${ui.inspectorOpen || ui.navigatorOpen ? '<button type="button" class="drawer-backdrop" data-action="close-mobile-panels" aria-label="Close open panel"></button>' : ''}
+    ${ui.inspectorOpen || ui.navigatorOpen ? '<button type="button" class="drawer-backdrop" data-action="close-mobile-panels" aria-label="Close open panel" tabindex="-1"></button>' : ''}
   </section>`;
 }
 
@@ -1371,19 +1396,34 @@ function collectPrintChecks(worksheet, pagination, outputView) {
     return [...result.warnings, ...result.errors].map((warning) => ({ ...warning, blockId: block.id }));
   });
   const answerLeaks = worksheet.blocks.filter((block) => block.model && (evaluateAnswerLeak(block.model, { intent: worksheet.intent }).risk !== 'none' || isAnswerRevealRisk(block.model, { intent: worksheet.intent }))).length;
-  checks.push({ warning: pagination.hasOverflow, text: pagination.hasOverflow ? 'One complete block is too tall for its page.' : 'No page overflow or clipped blocks detected.' });
+  const renderedGeometryIssues = ui.renderedGeometryIssues ?? [];
+  const incompleteAnswers = outputView === 'answer'
+    ? worksheet.blocks.filter((block) => block.kind === 'question'
+      && !(block.teacher?.answer != null && String(block.teacher.answer).trim().length)
+      && !block.teacher?.completedModel).length
+    : 0;
+  const geometryWarning = pagination.hasOverflow || renderedGeometryIssues.length > 0;
+  checks.push({ warning: geometryWarning, text: geometryWarning ? 'A block is clipped, overlaps another block, or is too tall for its page.' : 'Rendered page geometry is clear: no clipping or block collisions detected.' });
   checks.push({ warning: pagination.tooSmallModelBlockIds.length > 0, text: pagination.tooSmallModelBlockIds.length ? `${pagination.tooSmallModelBlockIds.length} ${pagination.tooSmallModelBlockIds.length === 1 ? 'model may' : 'models may'} be too small when printed.` : 'Every model remains above its minimum print size.' });
   checks.push({ warning: worksheet.intent === 'assessment' && answerLeaks > 0 && outputView === 'pupil', text: worksheet.intent === 'assessment' && answerLeaks > 0 && outputView === 'pupil' ? `${answerLeaks} assessment ${answerLeaks === 1 ? 'model may' : 'models may'} reveal assessed thinking.` : 'No unacknowledged answer-reveal risk in this output.' });
   checks.push({ warning: pagination.blocksWithoutResponseSpace.length > 0, text: pagination.blocksWithoutResponseSpace.length ? `${pagination.blocksWithoutResponseSpace.length} ${pagination.blocksWithoutResponseSpace.length === 1 ? 'question has' : 'questions have'} no meaningful response space.` : 'Every question has a response route or completion model.' });
   checks.push({ warning: modelWarnings.some((warning) => warning.severity === 'error'), text: modelWarnings.some((warning) => warning.severity === 'error') ? 'A model has invalid mathematical values and will show a safety message.' : 'All attached models pass mathematical integrity checks.' });
+  if (outputView === 'answer') checks.push({
+    warning: incompleteAnswers > 0,
+    text: incompleteAnswers
+      ? `${incompleteAnswers} ${incompleteAnswers === 1 ? 'question has' : 'questions have'} no stored answer or completed teacher model.`
+      : 'Every question has an answer or completed teacher model.',
+  });
   checks.push({ warning: pagination.crowdedPageNumbers?.length > 0, text: pagination.crowdedPageNumbers?.length ? `${pagination.crowdedPageNumbers.length === 1 ? 'Page' : 'Pages'} ${pagination.crowdedPageNumbers.join(', ')} ${pagination.crowdedPageNumbers.length === 1 ? 'is' : 'are'} crowded. Reduce working space or move a question.` : 'No page is overcrowded.' });
   checks.push({ warning: pagination.sparsePageNumbers?.length > 0, text: pagination.sparsePageNumbers?.length ? `${pagination.sparsePageNumbers.length === 1 ? 'Page' : 'Pages'} ${pagination.sparsePageNumbers.join(', ')} ${pagination.sparsePageNumbers.length === 1 ? 'has' : 'have'} a large unused area.` : 'No accidental sparse page detected.' });
   checks.push({ warning: pagination.orphanedHeadingBlockIds?.length > 0, text: pagination.orphanedHeadingBlockIds?.length ? 'A section heading is isolated from its question.' : 'Section headings stay with the next block.' });
   if (isWorkbookSheet(worksheet)) checks.unshift({
-    warning: pagination.workbookFitsOnePage !== true,
-    text: pagination.workbookFitsOnePage === true
+    warning: pagination.workbookFitsOnePage !== true || renderedGeometryIssues.length > 0,
+    text: pagination.workbookFitsOnePage === true && renderedGeometryIssues.length === 0
       ? 'Workbook cut-outs fit on one readable A4 page.'
-      : `Workbook cut-outs need ${pagination.pageCount} pages at a readable size. Remove questions or make another sheet.`,
+      : pagination.pageCount === 1
+        ? 'Workbook cut-outs do not fit their trim areas safely. Reduce working space or make another sheet.'
+        : `Workbook cut-outs need ${pagination.pageCount} pages at a readable size. Remove questions or make another sheet.`,
   });
   return checks;
 }
@@ -1528,6 +1568,8 @@ function createWorkbookCutoutVersion() {
   if (versionsDialog.open) renderVersionsContent();
   if (pagination.workbookFitsOnePage === true) {
     toast('Workbook cut-outs made as one readable A4 page.');
+  } else if (pagination.pageCount === 1) {
+    toast('Workbook cut-outs do not fit their trim areas safely. Nothing has been shrunk.', 'warning');
   } else {
     toast(`Workbook cut-outs need ${pagination.pageCount} pages at a readable size. Nothing has been shrunk.`, 'warning');
   }
@@ -1549,7 +1591,7 @@ function renderProjectList() {
 function updateHeader() {
   const worksheet = store.getState();
   const pagination = ui.stage === 'make' || ui.stage === 'print'
-    ? (ui.lastPagination ?? paginateWorksheet(worksheet, { outputView: worksheet.outputView }))
+    ? (ui.lastPagination ?? paginateWorksheet(worksheet, { outputView: ui.stage === 'make' ? 'pupil' : worksheet.outputView }))
     : null;
   const context = document.querySelector('#header-context');
   if (context) context.textContent = ui.stage === 'paste'
@@ -1578,9 +1620,85 @@ function scalePages() {
     const scale = Math.max(0.2, Math.min(max, (parentWidth - padding) / pageWidth));
     const page = shell.querySelector('.worksheet-page');
     page?.style.setProperty('--page-scale', String(scale));
+    page?.style.setProperty('--page-controls-scale', String(1 / scale));
     shell.style.width = `${pageWidth * scale}px`;
     shell.style.height = `${pageHeight * scale}px`;
   });
+}
+
+function auditRenderedPageGeometry(context) {
+  const issues = [];
+  const shells = [...root.querySelectorAll(`[data-page-shell][data-preview-context="${context}"]`)];
+  for (const shell of shells) {
+    const page = shell.querySelector('.worksheet-page');
+    if (!page) continue;
+    const pageRect = page.getBoundingClientRect();
+    const scale = Math.max(0.2, Number.parseFloat(getComputedStyle(page).getPropertyValue('--page-scale')) || 1);
+    const tolerance = Math.max(1, scale);
+    const blocks = [...page.querySelectorAll(':scope > .question-block')];
+    for (const block of blocks) {
+      const rect = block.getBoundingClientRect();
+      if (rect.left < pageRect.left - tolerance
+        || rect.top < pageRect.top - tolerance
+        || rect.right > pageRect.right + tolerance
+        || rect.bottom > pageRect.bottom + tolerance) {
+        issues.push({ code: 'block-outside-page', blockId: block.dataset.blockId, page: page.dataset.pageNumber });
+      }
+      const printableContent = [...block.querySelectorAll('.question-row, .question-copy, .model-slot, .model-slot svg, .response-space, .pupil-support, .teacher-note, .answer-note')];
+      if (printableContent.some((element) => {
+        const contentRect = element.getBoundingClientRect();
+        return contentRect.left < rect.left - tolerance
+          || contentRect.right > rect.right + tolerance
+          || contentRect.bottom > rect.bottom + tolerance;
+      })) issues.push({ code: 'block-content-overflow', blockId: block.dataset.blockId, page: page.dataset.pageNumber });
+    }
+    for (let index = 0; index < blocks.length; index += 1) {
+      const first = blocks[index].getBoundingClientRect();
+      for (let otherIndex = index + 1; otherIndex < blocks.length; otherIndex += 1) {
+        const second = blocks[otherIndex].getBoundingClientRect();
+        const overlapWidth = Math.min(first.right, second.right) - Math.max(first.left, second.left);
+        const overlapHeight = Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top);
+        if (overlapWidth > tolerance && overlapHeight > tolerance) {
+          issues.push({
+            code: 'block-collision',
+            blockId: blocks[index].dataset.blockId,
+            otherBlockId: blocks[otherIndex].dataset.blockId,
+            page: page.dataset.pageNumber,
+          });
+        }
+      }
+    }
+  }
+  return issues;
+}
+
+function refreshRenderedGeometryAudit() {
+  if (!['make', 'print'].includes(ui.stage)) return;
+  const context = ui.stage === 'print' ? 'print-preview' : 'editor-preview';
+  const issues = auditRenderedPageGeometry(context);
+  const signature = `${context}:${JSON.stringify(issues)}`;
+  if (signature === ui.renderedGeometrySignature) return;
+  ui.renderedGeometrySignature = signature;
+  ui.renderedGeometryIssues = issues;
+  // Print certification is generated before layout exists. Re-render once
+  // after the real DOM geometry has been checked so "Ready" is evidence-based.
+  if (ui.stage === 'print') scheduleRender();
+}
+
+function syncDrawerModality() {
+  const activePanel = ui.inspectorOpen
+    ? root.querySelector('#question-inspector')
+    : ui.navigatorOpen ? root.querySelector('#mobile-question-navigator') : null;
+  const modalOpen = Boolean(activePanel);
+  document.querySelector('.app-header')?.toggleAttribute('inert', modalOpen);
+  root.querySelector('.make-toolbar')?.toggleAttribute('inert', modalOpen);
+  root.querySelector('.workspace-scroll')?.toggleAttribute('inert', modalOpen);
+  const inspector = root.querySelector('#question-inspector');
+  const navigator = root.querySelector('#mobile-question-navigator');
+  if (inspector && inspector !== activePanel) inspector.setAttribute('inert', '');
+  else inspector?.removeAttribute('inert');
+  if (navigator && navigator !== activePanel) navigator.setAttribute('inert', '');
+  else navigator?.removeAttribute('inert');
 }
 
 function render() {
@@ -1597,6 +1715,8 @@ function render() {
   renderedStage = ui.stage;
   requestAnimationFrame(() => {
     scalePages();
+    syncDrawerModality();
+    refreshRenderedGeometryAudit();
     if (preserveInteraction) restoreInteraction(root, interaction);
     else if (previousStage != null && !document.querySelector('dialog[open]')) {
       root.setAttribute('tabindex', '-1');
@@ -1636,6 +1756,10 @@ function openMobilePanel(panelName, returnSelector = null) {
 }
 
 function closeMobilePanels() {
+  // Closing a modal drawer can remove its focused textarea before `change`
+  // fires. Commit the queued teacher-only value while its block/version
+  // identity is still intact so Escape and backdrop taps cannot lose work.
+  persistPendingTeacherField();
   const returnAction = mobilePanelReturnAction
     ?? (ui.navigatorOpen ? MOBILE_PANEL_CONFIG.navigator.triggerAction : MOBILE_PANEL_CONFIG.inspector.triggerAction);
   const closedInspector = ui.inspectorOpen;
@@ -1888,7 +2012,7 @@ function persistTeacherField(block, details) {
 
 function saveTeacherFieldFromTarget(target, worksheet = store.getState(), block = selectedBlock(worksheet)) {
   const details = teacherFieldDetails(target);
-  if (pendingTeacherFieldSave?.blockId === block?.id && pendingTeacherFieldSave.details?.key === details?.key) {
+  if (pendingTeacherFieldSave?.blockId === block?.id && pendingTeacherFieldSave?.details?.key === details?.key) {
     clearTimeout(teacherFieldSaveTimer);
     teacherFieldSaveTimer = null;
     pendingTeacherFieldSave = null;
@@ -1937,10 +2061,22 @@ function preparePrintState() {
   store.flush();
 }
 
+function flushBeforeDestructiveAction(actionLabel) {
+  persistPendingTeacherField();
+  if (store.flush()) return true;
+  toast(`This worksheet is not safely saved, so Maths Page Studio will not ${actionLabel}. Free some device storage or allow local storage, then try again.`, 'warning');
+  return false;
+}
+
 function attachModel(family) {
   const worksheet = store.getState();
   const block = selectedBlock(worksheet);
   if (!block || block.kind !== 'question') return;
+  const match = matchForBlock(block, worksheet);
+  if (match.interpretation?.status === 'needs-referenced-visual') {
+    toast('This question refers to a missing visual. Add the source information to the wording before choosing a replacement model.', 'warning');
+    return;
+  }
   const recipe = manualRecipeFor(family, block);
   const { model, validation } = validatedModelForBlock(recipe, worksheet, { binding: 'bound', teacherChosen: true });
   if (!model) {
@@ -2090,7 +2226,7 @@ document.addEventListener('change', (event) => {
     dispatchMaster(worksheetActions.setPurpose(target.value));
   } else if (target.matches('[data-role="project-title"]')) {
     const name = target.value.trim() || worksheet.metadata.title || 'Untitled worksheet';
-    store.dispatch(worksheetActions.updateMetadata({ name }));
+    store.dispatch(worksheetActions.updateMetadata({ name, title: name }));
   } else if (target.matches('[data-role="question-display"]') && block) {
     updateQuestionWording(block, target.value);
   } else if (target.matches('[data-role="model-field"]')) {
@@ -2454,8 +2590,9 @@ document.addEventListener('click', async (event) => {
   } else if (action === 'reset-version-block') {
     const activeId = masterWorksheet().versions?.activeId ?? 'master';
     if (activeId !== 'master') {
+      const workbook = isWorkbookSheet(store.getState());
       dispatchMaster(worksheetActions.resetVersionBlock(activeId, id));
-      toast('This question now inherits the Standard version again.');
+      toast(workbook ? 'Workbook-only changes removed.' : 'This question now inherits the Standard version again.');
       render();
     }
   } else if (action === 'add-section') {
@@ -2470,10 +2607,6 @@ document.addEventListener('click', async (event) => {
     const page = document.querySelector(`.a4-shell [data-page-number="${CSS.escape(button.dataset.page)}"]`);
     page?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
   } else if (action === 'open-navigator') {
-    ui.reviewOnly = false;
-    openMobilePanel('navigator');
-  } else if (action === 'open-review') {
-    ui.reviewOnly = true;
     openMobilePanel('navigator');
   } else if (action === 'open-inspector') {
     openMobilePanel('inspector');
@@ -2490,6 +2623,7 @@ document.addEventListener('click', async (event) => {
     preparePrintState();
     requestAnimationFrame(() => window.print());
   } else if (action === 'load-project') {
+    if (!flushBeforeDestructiveAction('open another worksheet')) return;
     if (store.load(id)) {
       // Every reopened project needs the same fail-closed reading/model
       // migration as the project restored during application startup.
@@ -2622,9 +2756,12 @@ document.addEventListener('pointerup', (event) => {
   clearTouchBlockDrag();
   if (!gesture.active || !gesture.targetId) return;
   const blocks = store.getState().blocks;
+  const sourceIndex = blocks.findIndex((block) => block.id === gesture.id);
   const targetIndex = blocks.findIndex((block) => block.id === gesture.targetId);
-  if (targetIndex < 0) return;
-  const destination = targetIndex + (gesture.insertAfter ? 1 : 0);
+  if (sourceIndex < 0 || targetIndex < 0) return;
+  // reorderBlock receives the final index after the source has been removed.
+  // Compensate when a touch drag crosses a later target.
+  const destination = reorderInsertionIndex(sourceIndex, targetIndex, gesture.insertAfter);
   store.dispatch(worksheetActions.reorderBlock(gesture.id, destination));
   toast('Question moved.');
 }, { passive: true });
@@ -2638,7 +2775,7 @@ document.querySelector('#project-library-button').addEventListener('click', () =
 });
 
 document.querySelector('#new-project-button').addEventListener('click', async () => {
-  store.flush();
+  if (!flushBeforeDestructiveAction('start a new worksheet')) return;
   store.newProject();
   ui = { ...ui, stage: 'paste', rawDraft: '', selectedId: null, editingId: null, browseModels: false, inspectorOpen: false, navigatorOpen: false };
   clearDraft();
@@ -2657,6 +2794,24 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault();
     closeMobilePanels();
     return;
+  }
+  if (event.key === 'Tab' && (ui.inspectorOpen || ui.navigatorOpen)) {
+    const panel = ui.inspectorOpen
+      ? document.querySelector('#question-inspector')
+      : document.querySelector('#mobile-question-navigator');
+    const focusable = panel ? [...panel.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])')]
+      .filter((element) => element.getClientRects().length > 0 && !element.closest('[inert]')) : [];
+    if (focusable.length) {
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
   }
   const modifier = event.metaKey || event.ctrlKey;
   if (!modifier) return;
@@ -2685,7 +2840,20 @@ window.addEventListener('beforeprint', () => {
   preparePrintState();
   if (ui.stage === 'make' || ui.stage === 'print') render();
 });
-window.addEventListener('beforeunload', () => store.flush());
+window.addEventListener('beforeunload', () => {
+  persistPendingTeacherField();
+  store.flush();
+});
+window.addEventListener('pagehide', () => {
+  persistPendingTeacherField();
+  store.flush();
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    persistPendingTeacherField();
+    store.flush();
+  }
+});
 
 refreshAutomaticReadingsOnLoad();
 store.subscribe((_state, meta) => {

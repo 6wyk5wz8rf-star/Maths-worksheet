@@ -5,6 +5,7 @@
   "type": "module",
   "description": "A local-first question-to-worksheet composer for primary mathematics.",
   "scripts": {
+    "build": "vite build",
     "dev": "vite",
     "test": "node --test",
     "serve": "python3 -m http.server 4173"

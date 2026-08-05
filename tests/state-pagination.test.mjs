@@ -27,6 +27,7 @@ import {
   A4_PORTRAIT,
   estimateWrappedLines,
   getPageGeometry,
+  measureQuestionBlock,
   mmToPx,
   pageCssVariables,
   paginateWorksheet,
@@ -34,6 +35,7 @@ import {
   pxToMm,
 } from '../js/pagination.js';
 import { matchQuestionToModels } from '../js/matcher.js';
+import { createBuild2ModelRecipe } from '../js/build2-model-bank.js';
 
 class MemoryStorage {
   constructor() {
@@ -715,6 +717,202 @@ test('A4 geometry and unit helpers are exact enough to share between preview and
   assert.ok(Math.abs(pxToMm(mmToPx(210)) - 210) < 1e-9);
   assert.equal(pageCssVariables(geometry)['--mps-page-width'], '210mm');
   assert.ok(estimateWrappedLines('A deliberately long sentence that wraps.', 20) > 1);
+  assert.equal(
+    estimateWrappedLines('Mark 2,750 on a number line from 2,000 to 3,000.', 78, { fontSizePt: 10.2 }),
+    2,
+    'half-width workbook questions reserve the same wrap seen in the printed Georgia face',
+  );
+  assert.equal(
+    estimateWrappedLines('There are 6 bags with 8 apples in each bag. How many apples are there altogether?', 78, { fontSizePt: 10.2 }),
+    3,
+    'long workbook questions cannot under-reserve a response area beneath wrapped text',
+  );
+});
+
+test('pagination measures the printed body scale rather than a fixed smaller question font', () => {
+  const text = 'Explain why the answer is correct using place value and compare it with another efficient mathematical method. '.repeat(2).slice(0, 120);
+  const block = question('scaled-copy', text, { response: { type: 'short-answer', size: 'compact' } });
+  const standard = measureQuestionBlock(block, 90, { density: 'standard', bodyScale: 'standard' });
+  const large = measureQuestionBlock(block, 90, { density: 'standard', bodyScale: 'large' });
+
+  assert.equal(standard.breakdown.questionFontPt, 11.2);
+  assert.equal(large.breakdown.questionFontPt, 12);
+  assert.ok(large.breakdown.questionMm > standard.breakdown.questionMm + 5, 'large printed copy wraps to the additional line that pagination reserves');
+});
+
+test('wide-model legibility uses the rendered slot after its physical indent and workbook chrome', () => {
+  const block = question('wide-model', 'Mark the value on the number line.', {
+    model: createModelRecipe('number-line', { size: 'extra-large' }),
+    response: { type: 'short-answer', size: 'compact' },
+  });
+  const normal = paginateWorksheet(worksheetWith([block], {
+    settings: { marginMm: 12, columns: 1 },
+  }));
+  assert.equal(normal.geometry.contentWidthMm, 186);
+  assert.equal(normal.placements['wide-model'].measurement.breakdown.modelWidthMm, 177, 'the 9 mm model indent is not offered to the SVG');
+  assert.deepEqual(normal.tooSmallModelBlockIds, [], 'extra-large is achievable in the complete portrait A4 slot');
+
+  const workbook = paginateWorksheet(worksheetWith([{
+    ...block,
+    composition: { ...block.composition, footprint: 'full' },
+  }], {
+    settings: {
+      workbookMode: true,
+      marginMm: 8,
+      margins: { top: 8, right: 8, bottom: 8, left: 8 },
+      density: 'compact',
+      bodyScale: 'small',
+      pageNumbers: false,
+    },
+    architecture: { compositionMode: 'rows', sections: [], header: { layout: 'compact', fields: {} } },
+  }));
+  const workbookMeasurement = workbook.placements['wide-model'].measurement;
+  assert.ok(workbookMeasurement.breakdown.modelWidthMm >= 177, 'the full-width cut-out slot reaches the achievable extra-large minimum');
+  assert.equal(workbook.pageCount, 1);
+  assert.equal(workbook.workbookFitsOnePage, true, 'one physical page is certified when the representation reaches its readable minimum');
+});
+
+test('workbook promotes label-bearing Build 2 models while retaining readable two-up equations', () => {
+  const workbookSettings = {
+    workbookMode: true,
+    columns: 2,
+    density: 'compact',
+    bodyScale: 'small',
+    marginMm: 8,
+    margins: { top: 8, right: 8, bottom: 8, left: 8 },
+    pageNumbers: false,
+    showNameField: false,
+    showClassField: false,
+    showDateField: false,
+  };
+  const architecture = { compositionMode: 'rows', sections: [], header: { layout: 'compact', fields: {} } };
+  const build2Block = (family, id) => question(id, `Use the ${family} model.`, {
+    model: { ...createBuild2ModelRecipe(family), position: 'beside', size: 'standard' },
+    response: { type: 'short-answer', size: 'compact' },
+    composition: { footprint: 'half' },
+    layout: { columnSpan: 'half' },
+  });
+
+  const labelled = paginateWorksheet(worksheetWith([
+    build2Block('sharing-division', 'workbook-sharing'),
+    build2Block('clock-model', 'workbook-clock'),
+  ], { settings: workbookSettings, architecture }));
+  for (const id of ['workbook-sharing', 'workbook-clock']) {
+    const placement = labelled.placements[id];
+    assert.equal(placement.column, null, `${id} receives a full workbook row`);
+    assert.equal(placement.widthMm, 194);
+    assert.equal(placement.measurement.breakdown.requestedPosition, 'beside');
+    assert.equal(placement.measurement.breakdown.position, 'beneath');
+    assert.ok(placement.measurement.breakdown.modelWidthMm > 170, `${id} labels use the readable full-width SVG scale`);
+  }
+  assert.equal(labelled.pageCount, 1, 'full-width promotion does not add a page when the readable models still fit');
+  assert.equal(labelled.workbookFitsOnePage, true);
+
+  const readableTwoUp = paginateWorksheet(worksheetWith([
+    build2Block('missing-number-strip', 'workbook-equation-a'),
+    build2Block('missing-number-strip', 'workbook-equation-b'),
+  ], { settings: workbookSettings, architecture }));
+  assert.deepEqual(
+    ['workbook-equation-a', 'workbook-equation-b'].map((id) => readableTwoUp.placements[id].column),
+    [0, 1],
+    '28 px equation glyphs retain the compact two-up workbook layout',
+  );
+  for (const id of ['workbook-equation-a', 'workbook-equation-b']) {
+    const measurement = readableTwoUp.placements[id].measurement;
+    assert.equal(measurement.breakdown.position, 'beneath', 'a safe half-width model still escapes the 40 mm beside track');
+    assert.ok(measurement.breakdown.modelWidthMm >= 78, '28 px glyphs remain above nine-point print size');
+  }
+  assert.equal(readableTwoUp.pageCount, 1);
+  assert.equal(readableTwoUp.workbookFitsOnePage, true);
+});
+
+test('normal and one-page workbook placements remain inside A4 and never collide', () => {
+  const assertSafePlacements = (result) => {
+    assert.equal(result.hasOverflow, false);
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        assert.ok(item.yMm >= page.bodyTopMm - 0.01);
+        assert.ok(item.yMm + item.heightMm <= page.bodyBottomMm + 0.01, `${item.blockId} stays inside page ${page.number}`);
+      }
+      for (let leftIndex = 0; leftIndex < page.items.length; leftIndex += 1) {
+        const left = page.items[leftIndex];
+        for (let rightIndex = leftIndex + 1; rightIndex < page.items.length; rightIndex += 1) {
+          const right = page.items[rightIndex];
+          const horizontalOverlap = left.xMm < right.xMm + right.widthMm - 0.01
+            && right.xMm < left.xMm + left.widthMm - 0.01;
+          const verticalOverlap = left.yMm < right.yMm + right.heightMm - 0.01
+            && right.yMm < left.yMm + left.heightMm - 0.01;
+          assert.ok(!(horizontalOverlap && verticalOverlap), `${left.blockId} and ${right.blockId} do not overlap`);
+        }
+      }
+    }
+  };
+
+  const normalBlocks = Array.from({ length: 10 }, (_, index) => question(
+    `normal-boundary-${index}`,
+    'Explain how you know the calculation is correct, compare both methods, and show every exchange clearly.',
+    { response: { type: 'writing-lines', size: 'standard', customRows: 7 } },
+  ));
+  const normal = paginateWorksheet(worksheetWith(normalBlocks, { settings: { bodyScale: 'large', marginMm: 12 } }));
+  assert.ok(normal.pageCount > 1);
+  assertSafePlacements(normal);
+
+  const workbookBlocks = Array.from({ length: 8 }, (_, index) => question(
+    `workbook-boundary-${index}`,
+    `Calculate ${index + 2} × ${index + 3}.`,
+    {
+      response: { type: 'short-answer', size: 'compact' },
+      composition: { footprint: 'half' },
+      layout: { columnSpan: 'half' },
+    },
+  ));
+  const workbook = paginateWorksheet(worksheetWith(workbookBlocks, {
+    settings: {
+      workbookMode: true,
+      columns: 2,
+      density: 'compact',
+      bodyScale: 'small',
+      marginMm: 8,
+      margins: { top: 8, right: 8, bottom: 8, left: 8 },
+      pageNumbers: false,
+      showNameField: false,
+      showClassField: false,
+      showDateField: false,
+    },
+    architecture: { compositionMode: 'rows', sections: [], header: { layout: 'compact', fields: {} } },
+  }));
+  assert.equal(workbook.pageCount, 1);
+  assert.equal(workbook.workbookFitsOnePage, true);
+  assertSafePlacements(workbook);
+});
+
+test('fixed table and labelled-step rows reserve their exact printed seven-millimetre tracks', () => {
+  for (const type of ['table-completion', 'labelled-steps']) {
+    const block = question(`rows-${type}`, 'Complete every row.', {
+      response: { type, size: 'standard', rows: 4, customRows: 14 },
+    });
+    const measured = measureQuestionBlock(block, 186, { density: 'standard', bodyScale: 'standard' });
+    assert.equal(measured.breakdown.responseMm, 98);
+    assert.equal(measured.breakdown.responseTotalMm, 100.5, 'the 2.5 mm response margin is outside the exact row box');
+
+    const legacyTwentyRows = question(`rows-twenty-${type}`, 'Complete every row.', {
+      response: { type, size: 'standard', rows: 4, customRows: 20 },
+    });
+    assert.equal(
+      measureQuestionBlock(legacyTwentyRows, 186, { density: 'standard', bodyScale: 'standard' }).breakdown.responseMm,
+      140,
+      'valid older saves with twenty rendered fixed rows are measured without truncation',
+    );
+  }
+
+  const minimumWritingLines = question('minimum-writing-lines', 'Explain.', {
+    response: { type: 'prove-it', size: 'standard', lines: 1, customRows: 1 },
+  });
+  assert.equal(
+    measureQuestionBlock(minimumWritingLines, 186, { density: 'standard', bodyScale: 'standard' }).breakdown.responseMm,
+    12,
+    'the two writing lines emitted by the renderer fit even when saved data requests one',
+  );
 });
 
 test('pagination keeps every question-model-response block indivisible across multiple pages', () => {
@@ -788,19 +986,26 @@ test('an unusually large first task is placed once with overflow instead of crea
   assert.ok(!result.warnings.some((warning) => warning.code === 'page-empty'));
 });
 
-test('two-column beside-model layouts flag illegible model widths and expose placement styles', () => {
-  const block = question('small_model', 'Represent 3,482 in the place-value chart.', {
-    model: createModelRecipe('place-value-chart', { position: 'beside', size: 'compact' }),
-    response: { type: 'none', size: 'compact' },
-  });
-  const worksheet = worksheetWith([block], { settings: { columns: 2, marginMm: 12 } });
-  const result = paginateWorksheet(worksheet);
-  assert.deepEqual(result.tooSmallModelBlockIds, ['small_model']);
-  assert.ok(result.blocksWithoutResponseSpace.includes('small_model'));
-  const style = placementStyle(result.placements.small_model);
-  assert.equal(style.breakInside, 'avoid');
-  assert.match(style.left, /mm$/);
-  assert.match(style.height, /mm$/);
+test('labelled manipulatives override legacy beside layouts with a readable full-width slot', () => {
+  for (const [family, id] of [['place-value-chart', 'place'], ['base-ten', 'dienes'], ['partitioning-frame', 'partition']]) {
+    const block = question(`labelled-${id}`, 'Represent the number using the labelled model.', {
+      model: createModelRecipe(family, { position: 'beside', size: 'compact' }),
+      response: { type: 'short-answer', size: 'compact' },
+    });
+    const worksheet = worksheetWith([block], { settings: { columns: 2, marginMm: 12 } });
+    const result = paginateWorksheet(worksheet);
+    const placement = result.placements[`labelled-${id}`];
+    assert.equal(placement.column, null);
+    assert.equal(placement.widthMm, 186);
+    assert.equal(placement.measurement.breakdown.requestedPosition, 'beside');
+    assert.equal(placement.measurement.breakdown.position, 'beneath');
+    assert.equal(placement.measurement.breakdown.modelWidthMm, 177);
+    assert.deepEqual(result.tooSmallModelBlockIds, []);
+    const style = placementStyle(placement);
+    assert.equal(style.breakInside, 'avoid');
+    assert.match(style.left, /mm$/);
+    assert.match(style.height, /mm$/);
+  }
 });
 
 test('pupil and teacher pagination can differ without mutating the worksheet', () => {

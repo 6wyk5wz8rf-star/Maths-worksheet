@@ -269,10 +269,12 @@ function rationalTokenValue(value) {
     const numerator = Number(mixed[2]);
     const denominator = Number(mixed[3]);
     if (!Number.isInteger(whole) || !Number.isInteger(numerator) || !Number.isInteger(denominator) || denominator <= 0) return null;
+    const rational = normaliseRational((whole * denominator) + ((whole < 0 ? -1 : 1) * numerator), denominator);
     return {
-      value: whole + ((whole < 0 ? -1 : 1) * (numerator / denominator)),
+      value: rational ? rational.numerator / rational.denominator : null,
       denominator,
       isFraction: true,
+      rational,
     };
   }
   const fraction = text.match(/^([−-]?\d+)\s*\/\s*(\d+)$/);
@@ -280,10 +282,12 @@ function rationalTokenValue(value) {
     const numerator = Number(fraction[1].replace('−', '-'));
     const denominator = Number(fraction[2]);
     if (!Number.isInteger(numerator) || !Number.isInteger(denominator) || denominator <= 0) return null;
-    return { value: numerator / denominator, denominator, isFraction: true };
+    const rational = normaliseRational(numerator, denominator);
+    return { value: numerator / denominator, denominator, isFraction: true, rational };
   }
-  const number = cleanNumber(text);
-  return Number.isFinite(number) ? { value: number, denominator: null, isFraction: false } : null;
+  const rational = parseRational(text);
+  const number = rational ? rational.numerator / rational.denominator : null;
+  return Number.isFinite(number) ? { value: number, denominator: rational.denominator, isFraction: false, rational } : null;
 }
 
 /**
@@ -295,8 +299,10 @@ export function parseNumberLinePrompt(input) {
   const source = String(input ?? '');
   const range = source.match(new RegExp(`\\b(?:from|between)\\s+(${RATIONAL_TOKEN_SOURCE})(?:\\s*(?:km|m|cm|mm|l|ml|kg|g))?\\s+(?:to|and)\\s+(${RATIONAL_TOKEN_SOURCE})`, 'i'));
   if (!range) return null;
-  const start = rationalTokenValue(range[1])?.value ?? null;
-  const end = rationalTokenValue(range[2])?.value ?? null;
+  const startInfo = rationalTokenValue(range[1]);
+  const endInfo = rationalTokenValue(range[2]);
+  const start = startInfo?.value ?? null;
+  const end = endInfo?.value ?? null;
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
 
   const directTarget = source.match(new RegExp(`\\b(?:place|mark|locate|plot)\\s+(${RATIONAL_TOKEN_SOURCE})(?=\\s+(?:on|along)\\s+(?:an?\\s+)?number\\s+line\\b)`, 'i'));
@@ -315,15 +321,29 @@ export function parseNumberLinePrompt(input) {
 
   const namedParts = source.match(/\b(?:divided|split)\s+into\s+(?:equal\s+)?(halves|thirds|quarters|fourths|fifths|sixths|sevenths|eighths|ninths|tenths)\b/i);
   const numericParts = source.match(/\b(?:divided|split)\s+into\s+(\d+)\s+(?:equal\s+)?(?:parts?|sections?)\b/i);
+  const intervalParts = source.match(new RegExp(`\\b(?:in\\s+)?(?:steps?|intervals?)\\s+of\\s+(${RATIONAL_TOKEN_SOURCE})`, 'i'));
   const requestedParts = namedParts ? FRACTION_WORDS[namedParts[1].toLowerCase()] : cleanNumber(numericParts?.[1]);
-  const fallbackDivisions = targetInfo?.denominator && Number.isInteger((end - start) * targetInfo.denominator)
-    ? (end - start) * targetInfo.denominator
+  const requestedStep = rationalTokenValue(intervalParts?.[1])?.value ?? null;
+  const intervalDivisions = Number.isFinite(requestedStep) && requestedStep > 0
+    ? (end - start) / requestedStep
     : null;
+  const targetRatio = targetInfo?.rational && startInfo?.rational && endInfo?.rational
+    ? divideRationals(
+      subtractRationals(targetInfo.rational, startInfo.rational),
+      subtractRationals(endInfo.rational, startInfo.rational),
+    )
+    : null;
+  // When endpoints and one target are explicit, the reduced target ratio
+  // supplies the smallest truthful equal-interval scale. This makes ordinary
+  // integer prompts as exact as fraction prompts without inventing a step.
+  const fallbackDivisions = targetRatio?.denominator ?? null;
   const divisions = Number.isInteger(requestedParts) && requestedParts > 0
     ? requestedParts
-    : Number.isInteger(fallbackDivisions) && fallbackDivisions > 0
-      ? fallbackDivisions
-      : null;
+    : Number.isInteger(intervalDivisions) && intervalDivisions > 0
+      ? intervalDivisions
+      : Number.isInteger(fallbackDivisions) && fallbackDivisions > 0
+        ? fallbackDivisions
+        : null;
   if (!Number.isInteger(divisions) || divisions < 1 || divisions > 20) return null;
   const step = (end - start) / divisions;
   return { start, end, divisions, step, target };
@@ -501,6 +521,10 @@ function deriveEquationAnswer(operator, left, right, result) {
  */
 export function parseSimpleEquation(value) {
   const source = normaliseMathsText(value);
+  // A compact slash inside fraction arithmetic is not a division operator.
+  // Do not let the tail of `3/4 + 1/4 = ?` masquerade as `1 ÷ 4 = ?`.
+  if (/\d+\s*\/\s*\d+\s*[+\-×÷*xX]\s*\d+\s*\/\s*\d+\s*=/.test(source)
+    || /\d+\s+\d+\s*\/\s*\d+\s*=/.test(source)) return null;
   const operator = '[+\\-×÷*/xX]';
   const forward = new RegExp(`(${EQUATION_TOKEN_SOURCE})\\s*(${operator})\\s*(${EQUATION_TOKEN_SOURCE})\\s*=\\s*(${EQUATION_TOKEN_SOURCE})`);
   const reverse = new RegExp(`(${EQUATION_TOKEN_SOURCE})\\s*=\\s*(${EQUATION_TOKEN_SOURCE})\\s*(${operator})\\s*(${EQUATION_TOKEN_SOURCE})`);
@@ -545,6 +569,9 @@ function parseFractionEquality(value) {
   const token = '(?:\\d+|\\?)';
   const match = source.match(new RegExp(`(${token})\\s*\\/\\s*(${token})\\s*=\\s*(${token})\\s*\\/\\s*(${token})`));
   if (!match) return null;
+  // The fraction token in a mixed number is not the whole left-hand operand.
+  // Reject rather than silently reading `1 1/2` as `1/2`.
+  if (/\d+\s+$/.test(source.slice(0, match.index))) return null;
   const values = match.slice(1).map((item) => item === '?' ? null : Number(item));
   if (values.filter((item) => item === null).length !== 1 || values.some((item) => item !== null && (!Number.isInteger(item) || item < 0))) return null;
   let [leftNumerator, leftDenominator, rightNumerator, rightDenominator] = values;
@@ -564,7 +591,9 @@ function parseFractionEquality(value) {
       { numerator: leftNumerator, denominator: leftDenominator },
       { numerator: rightNumerator, denominator: rightDenominator },
     ],
-    unknownPosition: missingIndex === 0 || missingIndex === 2 ? 'numerator' : 'denominator',
+    unknownPosition: `fraction:${missingIndex < 2 ? 0 : 1}:${missingIndex % 2 === 0 ? 'numerator' : 'denominator'}`,
+    unknownFractionIndex: missingIndex < 2 ? 0 : 1,
+    unknownPart: missingIndex % 2 === 0 ? 'numerator' : 'denominator',
     exact: true,
   };
 }
@@ -606,12 +635,13 @@ function detectDomains(info, source, equation = null) {
   if (has(/\b(?:place value|digit|thousands?|hundreds?|tens?|ones?|partition|expanded form|roman numeral|negative number|base[- ]ten|dienes?)\b/)
     || has(/\bvalue\s+of\s+(?:the\s+)?(?:digit\s*)?\d/)) addScore(scores, 'Number and place value', 8);
   if (has(/\b(?:round|nearest)\b/)) addScore(scores, 'Number and place value', 8);
+  if (has(/\bnumber\s+line\b/) && !info.fractions.length) addScore(scores, 'Number and place value', 8);
   if (has(/\b(?:order|compare|greater than|less than)\b/) || (info.comparisonLanguage?.length ?? 0) > 0) {
     addScore(scores, 'Number and place value', 8);
   }
   if (info.operations.includes('addition') || has(/\b(?:add|sum|altogether|combined)\b/)) addScore(scores, 'Addition', 7);
   if (info.operations.includes('subtraction') || has(/\b(?:subtract|take away|fewer|difference|remain)\b/)) addScore(scores, 'Subtraction', 7);
-  if (info.operations.includes('multiplication') || has(/\b(?:multiply|times|product|groups? of)\b/)) addScore(scores, 'Multiplication', 7);
+  if (info.operations.includes('multiplication') || has(/\b(?:multiply|times|twice|double|product|groups? of)\b/)) addScore(scores, 'Multiplication', 7);
   if (info.operations.includes('division') || has(/\b(?:divide|share|shared|grouping|remainder)\b/)) addScore(scores, 'Division', 7);
   // Boxed equations do not always make it through the lightweight importer as
   // an operation token. The local equation parser is exact, so it is safe to
@@ -622,7 +652,7 @@ function detectDomains(info, source, equation = null) {
   if (equation?.operator === 'division') addScore(scores, 'Division', 9);
   if (info.fractions.length || fractionFromWords(lower) || has(/\b(?:fraction|numerator|denominator|equivalent|halves|quarters|fifths|tenths)\b/)) addScore(scores, 'Fractions', 9);
   if (has(/\b(?:decimal|tenths|hundredths)\b/) || info.numbers?.some((number) => number.decimal)) addScore(scores, 'Decimals', 7);
-  if (has(/[£]|\b(?:pence|pounds?|coins?)\b/)) addScore(scores, 'Money', 10);
+  if (has(/[£]|\b(?:pence|pounds?|coins?)\b|\d\s*p\b/)) addScore(scores, 'Money', 10);
   if (has(/\b(?:perimeter|boundary)\b/)) addScore(scores, 'Perimeter', 12);
   if (has(/\b(?:area|square centimetres?|cm²|square units?)\b/)) addScore(scores, 'Area', 12);
   if (has(/\b(?:angle|triangle|quadrilateral|polygon|parallel|perpendicular|symmetry|reflect)\b/)) addScore(scores, 'Geometry', 10);
@@ -653,7 +683,8 @@ function inferQuestionFamily(source, info, equation) {
   if (includes(/\b(?:plot|coordinate)\b/)) return 'plot-coordinates';
   if (includes(/\b(?:perimeter)\b/)) return 'find-perimeter';
   if (includes(/\b(?:area)\b/)) return 'find-area';
-  if (includes(/\b(?:duration|how long|elapsed time)\b/)) return 'calculate-duration';
+  if (includes(/\b(?:duration|elapsed time)\b/)
+    || (includes(/\bhow long\b/) && (info.times?.length ?? 0) >= 2)) return 'calculate-duration';
   if (includes(/\b(?:convert|conversion)\b/)) return 'convert-measure';
   if (includes(/\b(?:equivalent)\b.*\b(?:fraction|fractions)\b/)) return 'equivalent-fraction';
   // “Which is closer to 3?” is a comparison of fractional distance, even
@@ -706,8 +737,34 @@ function directMoreLessChange(source) {
   };
 }
 
+function proportionalScaleDetails(source, info = null) {
+  const text = String(source ?? '').toLowerCase();
+  const numberWords = Object.keys(NUMBER_WORDS).join('|');
+  const multiplierToken = `(?:${NUMBER_SOURCE}|${numberWords}|twice)`;
+  const relationMatch = text.match(new RegExp(`\\b(${multiplierToken})(?:\\s+times)?\\s+as\\s+(?:many|much|long)(?:\\s+[a-z][a-z'-]*){0,3}\\s+as\\b`, 'i'));
+  if (!relationMatch) return null;
+  const directOriginal = text.slice(relationMatch.index + relationMatch[0].length)
+    .match(new RegExp(`^\\s+(?:an?\\s+)?(${NUMBER_SOURCE})\\b`, 'i'));
+  const rawMultiplier = relationMatch[1].toLowerCase();
+  const multiplier = rawMultiplier === 'twice'
+    ? 2
+    : NUMBER_WORDS[rawMultiplier] ?? cleanNumber(rawMultiplier);
+  const relationStart = relationMatch.index;
+  const relationEnd = relationStart + relationMatch[0].length;
+  const otherQuantities = (info?.numbers ?? [])
+    .filter((quantity) => quantity.end <= relationStart || quantity.start >= relationEnd)
+    .map((quantity) => quantity.value)
+    .filter(Number.isFinite);
+  const original = cleanNumber(directOriginal?.[1])
+    ?? (otherQuantities.length === 1 ? otherQuantities[0] : null);
+  if (!Number.isInteger(multiplier) || multiplier < 1 || !Number.isFinite(original)) return null;
+  return { original, multiplier, scaled: original * multiplier };
+}
+
 function inferRepresentationPurpose(family, source, info) {
   const lower = source.toLowerCase();
+  if (family === 'partition' && /\b(?:partition|expanded form|decompose)\b/.test(lower)) return 'record-thinking';
+  if (family === 'represent' && /\b(?:draw|use|represent|show|make)\b/.test(lower)) return 'record-thinking';
   if (['find-error', 'correct-error', 'justify', 'prove', 'explain'].includes(family)) return 'support-reasoning-or-proof';
   if (['construct-chart', 'plot-coordinates', 'sort', 'classify', 'complete', 'missing-number', 'draw-hands', 'locate-on-number-line'].includes(family)) return 'record-thinking';
   if (['interpret-chart'].includes(family)) return 'represent-supplied-data';
@@ -758,6 +815,8 @@ function deriveWordStructure(info, source, family, equation) {
     startValue: null,
     endValue: null,
     multiplier: null,
+    originalValue: null,
+    scaledValue: null,
     divisor: null,
     quotient: null,
     remainder: /\bremainder|left over\b/i.test(lower) ? null : undefined,
@@ -807,6 +866,14 @@ function deriveWordStructure(info, source, family, equation) {
     result.change = directChange.change;
     result.operation = directChange.operation;
     result.unknownPosition ??= 'result';
+  }
+
+  const proportionalScale = proportionalScaleDetails(lower, info);
+  if (proportionalScale) {
+    result.originalValue = proportionalScale.original;
+    result.multiplier = proportionalScale.multiplier;
+    result.scaledValue = proportionalScale.scaled;
+    result.unknownPosition ??= 'scaled-value';
   }
 
   const fraction = info.fractions?.[0] ?? fractionFromWords(lower);
@@ -861,8 +928,8 @@ function deriveWordStructure(info, source, family, equation) {
     result.unknownPosition ??= 'whole';
   }
 
-  const groupsPattern = lower.match(new RegExp(`\\b(${NUMBER_SOURCE})\\s+(?:bags?|boxes?|groups?|rows?)\\s+(?:with|of)\\s+(${NUMBER_SOURCE})\\b`, 'i'))
-    || lower.match(new RegExp(`\\b(${NUMBER_SOURCE})\\s+groups?\\s+of\\s+(${NUMBER_SOURCE})\\b`, 'i'));
+  const groupsPattern = lower.match(new RegExp(`\\b(${NUMBER_SOURCE})\\s+(?:bags?|boxes?|packs?|trays?|groups?|rows?)\\s+(?:with|of)\\s+(${NUMBER_SOURCE})\\b`, 'i'))
+    || lower.match(new RegExp(`\\beach\\s+of\\s+(${NUMBER_SOURCE})\\s+[a-z][a-z'-]*(?:\\s+[a-z][a-z'-]*){0,2}\\s+(?:has|have|holds?|contains?)\\s+(${NUMBER_SOURCE})\\b`, 'i'));
   if (groupsPattern) {
     result.numberOfGroups = cleanNumber(groupsPattern[1]);
     result.groups = result.numberOfGroups;
@@ -878,10 +945,13 @@ function deriveWordStructure(info, source, family, equation) {
     result.divisor = second;
     result.unknownPosition ??= 'group-size';
   } else if (info.divisionInterpretation === 'grouping') {
-    const groupMatch = lower.match(new RegExp(`\\bgroups?\\s+of\\s+(${NUMBER_SOURCE})`, 'i'));
+    const groupMatch = lower.match(new RegExp(`\\b(?:groups?|bags?|boxes?|packs?)\\s+of\\s+(${NUMBER_SOURCE})`, 'i'))
+      || lower.match(new RegExp(`\\bhow\\s+many\\s+(${NUMBER_SOURCE})(?:s|'s)?\\s+(?:are\\s+there\\s+)?(?:in|from)\\b`, 'i'));
     const totalMatch = lower.match(new RegExp(`\\b(?:from|out of)\\s+(${NUMBER_SOURCE})`, 'i'));
     const groupSize = cleanNumber(groupMatch?.[1]) ?? first;
-    const total = cleanNumber(totalMatch?.[1]) ?? second;
+    const total = cleanNumber(totalMatch?.[1])
+      ?? values.find((value) => value !== groupSize)
+      ?? second;
     result.whole = total;
     result.groupSize = groupSize;
     result.divisor = groupSize;
@@ -912,7 +982,17 @@ function deriveWordStructure(info, source, family, equation) {
   if (family === 'calculate-duration' && info.times?.length >= 2) {
     const start = `${String(info.times[0].hours).padStart(2, '0')}:${String(info.times[0].minutes).padStart(2, '0')}`;
     const end = `${String(info.times[1].hours).padStart(2, '0')}:${String(info.times[1].minutes).padStart(2, '0')}`;
-    result.measurement = { startTime: start, endTime: end, durationMinutes: durationMinutes(start, end), unit: 'minutes' };
+    const explicit24HourNextDay = !info.times[0]?.meridiem && !info.times[1]?.meridiem
+      && info.times[0]?.sourceHours >= 12 && info.times[1]?.sourceHours < 12;
+    const explicitNextDay = Boolean(info.times[0]?.meridiem && info.times[1]?.meridiem)
+      || explicit24HourNextDay;
+    result.measurement = {
+      startTime: start,
+      endTime: end,
+      durationMinutes: durationMinutes(start, end, { allowNextDay: explicitNextDay }),
+      crossesMidnight: explicitNextDay && parseTimeToMinutes(end) < parseTimeToMinutes(start),
+      unit: 'minutes',
+    };
     result.unknownPosition ??= 'duration';
   }
 
@@ -988,7 +1068,7 @@ function answerProtection(family, source, structure, equation) {
   if (family === 'round') add('rounded-value', 'The rounded value must remain a pupil decision.');
   if (family === 'compare') add(structure.unknownPosition ?? 'comparison-symbol', 'The comparison relationship must not be completed for the pupil.');
   if (family === 'construct-chart') add('chart-data', 'A construction chart must keep the required bars, points or labels blank.');
-  if (family === 'equivalent-fraction') add('equivalent-fraction', 'The equivalent numerator or denominator is the intended inference.');
+  if (family === 'equivalent-fraction') add(structure.unknownPosition ?? 'equivalent-fraction', 'Only the requested equivalent-fraction slot may be hidden.');
   if (/\b(?:draw|show)\b.*\b(?:hands?|clock)\b/i.test(source)) add('clock-hands', 'The pupil is being asked to set the clock hands.');
   if (family === 'find-area') add('area', 'The calculated area must not be printed in the model.');
   if (family === 'find-perimeter') add('perimeter', 'The calculated perimeter must not be printed in the model.');
@@ -1009,7 +1089,9 @@ function interpretationConfidence(info, family, structure, domains, equation) {
   let score = 0;
   if (domains.length && domains[0].score >= 7) score += 3;
   if (equation?.exact) score += 3;
-  if (structure.comparison || structure.rounding || structure.measurement || structure.scale || structure.numerator !== null || structure.numberOfGroups !== null) score += 2;
+  if (structure.comparison || structure.rounding || structure.measurement || structure.scale
+    || structure.numerator !== null || structure.numberOfGroups !== null
+    || (Number.isFinite(structure.originalValue) && Number.isInteger(structure.multiplier) && Number.isFinite(structure.scaledValue))) score += 2;
   if (info.operations.length === 1) score += 1;
   const source = info.analysedText ?? '';
   const explicitTaskStructure =
@@ -1026,6 +1108,146 @@ function interpretationConfidence(info, family, structure, domains, equation) {
   if (score >= 5) return 'high';
   if (score >= 2) return 'medium';
   return 'low';
+}
+
+function compoundTaskSignals(info, source) {
+  const signals = [];
+  const arithmeticExpressions = source.match(/(?:\d[\d,]*(?:\.\d+)?)\s*[+−\-×÷]\s*(?:\d[\d,]*(?:\.\d+)?)/g) ?? [];
+  if (arithmeticExpressions.length > 1) signals.push('multiple-calculations');
+  if ((source.match(/=/g) ?? []).length > 1) signals.push('multiple-equations');
+  if ((info.subparts?.length ?? 0) > 1) signals.push('multiple-subparts');
+  if (/(?:\b(?:and|then)\b|[.?!])\s*(?:explain|justify|prove|describe|show\s+(?:your\s+)?(?:method|working)|give\s+(?:a\s+)?reason)\b/i.test(source)) {
+    signals.push('calculation-and-reasoning');
+  }
+  if (/\b(?:and(?:\s+then)?|then)\s+(?:calculate|work\s+out|find|round|convert|compare|order|mark|plot|draw|complete|add|subtract|multiply|divide|double|halve)\b/i.test(source)) {
+    signals.push('sequential-tasks');
+  }
+  if ((source.match(/\b(?:how\s+many|how\s+much|what\s+is|what\s+are)\b/gi) ?? []).length > 1) {
+    signals.push('multiple-questions');
+  }
+  if (/\bbetween\s+each\s+pair\b/i.test(source) && (info.numericValues?.length ?? 0) > 2) signals.push('multiple-comparison-pairs');
+  const locationTask = source.match(/\b(?:mark|place|locate|plot)\s+([\s\S]*?)\s+(?:on|along)\s+(?:an?\s+)?number\s+line\b/i);
+  if (locationTask && /\band\b/i.test(locationTask[1])) signals.push('multiple-line-targets');
+  const fractionOfTasks = source.match(/\b\d+\s*\/\s*\d+\s+of\s+\d[\d,]*/gi) ?? [];
+  if (fractionOfTasks.length > 1) signals.push('multiple-fraction-calculations');
+  if (/\b\d+\s+\d+\s*\/\s*\d+\s*=/.test(source)) signals.push('mixed-fraction-equality');
+  if (/\barea\b[\s\S]*\bperimeter\b|\bperimeter\b[\s\S]*\barea\b/i.test(source)) signals.push('area-and-perimeter');
+  return [...new Set(signals)];
+}
+
+function rationalAnswerValue(value) {
+  const rational = parseRational(value);
+  if (!rational) return null;
+  if (rational.denominator === 1) return rational.numerator;
+  let finiteDenominator = rational.denominator;
+  while (finiteDenominator % 2 === 0) finiteDenominator /= 2;
+  while (finiteDenominator % 5 === 0) finiteDenominator /= 5;
+  return finiteDenominator === 1 ? rational.numerator / rational.denominator : null;
+}
+
+function directBinaryAnswer(source, info, family) {
+  if (family !== 'calculate') return null;
+  const pattern = new RegExp(`(^|[^\\d/.,])(${NUMBER_SOURCE})\\s*([+\\-×÷]|\\s/\\s)\\s*(${NUMBER_SOURCE})(?![\\d/,])`, 'g');
+  const matches = [...source.matchAll(pattern)];
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  const expressionEnd = match.index + match[0].length;
+  const trailing = source.slice(expressionEnd);
+  if (/^\s*=\s*[−-]?\d/.test(trailing)) return null;
+  const directPrompt = /\b(?:calculate|work out|solve|find|what is|give the answer)\b/i.test(source)
+    || /^\s*[−-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[+\-×÷]/.test(source);
+  if (!directPrompt || (info.fractions?.length ?? 0) > 0) return null;
+  const left = parseRational(match[2].replaceAll(',', ''));
+  const right = parseRational(match[4].replaceAll(',', ''));
+  if (!left || !right) return null;
+  const operator = match[3].trim();
+  const result = operator === '+' ? addRationals(left, right)
+    : operator === '-' ? subtractRationals(left, right)
+      : operator === '×' ? multiplyRationals(left, right)
+        : divideRationals(left, right);
+  if (!result) return null;
+  // A whole-number division with a remainder may require a remainder, a
+  // fraction or a decimal depending on wording. Never choose one silently.
+  if ((operator === '÷' || operator === '/')
+    && left.denominator === 1 && right.denominator === 1
+    && result.denominator !== 1) return null;
+  const answer = rationalAnswerValue(result);
+  return answer === null ? null : { answer, source: 'direct-calculation' };
+}
+
+function uniqueDigitValueAnswer(source, info, family) {
+  if (family !== 'identify-place-value' || (info.numericValues?.length ?? 0) !== 2) return null;
+  const match = source.match(/\bvalue\s+of\s+(?:the\s+)?(?:digit\s*)?(\d)\s+in\s+(\d[\d,]*(?:\.\d+)?)/i);
+  if (!match) return null;
+  const target = match[1];
+  const numeral = match[2].replaceAll(',', '');
+  if ([...numeral].filter((character) => character === target).length !== 1) return null;
+  const decimalIndex = numeral.indexOf('.');
+  const digitIndex = numeral.indexOf(target);
+  const exponent = decimalIndex < 0
+    ? numeral.length - digitIndex - 1
+    : digitIndex < decimalIndex ? decimalIndex - digitIndex - 1 : decimalIndex - digitIndex;
+  const answer = Number(target) * (10 ** exponent);
+  return Number.isFinite(answer) ? { answer, source: 'digit-value' } : null;
+}
+
+function derivedAnswerForResolvedQuestion({ source, info, family, structure, equation, directCalculation = null }) {
+  if (equation?.privateDerivedAnswer !== null && equation?.privateDerivedAnswer !== undefined) {
+    return { answer: equation.privateDerivedAnswer, source: 'simple-equation' };
+  }
+
+  const direct = directCalculation ?? directBinaryAnswer(source, info, family);
+  if (direct) return direct;
+
+  const digitValue = uniqueDigitValueAnswer(source, info, family);
+  if (digitValue) return digitValue;
+
+  if (family === 'round' && structure.rounding && structure.roundingTargets?.length === 1) {
+    const { target, lower, upper, midpoint } = structure.rounding;
+    if ([target, lower, upper, midpoint].every(Number.isFinite) && target >= 0) {
+      return { answer: target < midpoint ? lower : upper, source: 'rounding' };
+    }
+  }
+
+  if (family === 'calculate-duration' && Number.isFinite(structure.measurement?.durationMinutes)) {
+    return { answer: structure.measurement.durationMinutes, source: 'duration' };
+  }
+
+  if (family === 'calculate'
+    && structure.unknownPosition === 'scaled-value'
+    && Number.isFinite(structure.originalValue)
+    && Number.isInteger(structure.multiplier)
+    && Number.isFinite(structure.scaledValue)
+    && /\b(?:calculate|work out|find|how many|how much|how long)\b|\?/i.test(source)) {
+    const exact = structure.originalValue * structure.multiplier;
+    if (Number.isFinite(exact) && exact === structure.scaledValue) {
+      return { answer: exact, source: 'scaling' };
+    }
+  }
+
+  if (family === 'calculate'
+    && structure.unknownPosition === 'product'
+    && Number.isSafeInteger(structure.numberOfGroups)
+    && Number.isSafeInteger(structure.groupSize)
+    && structure.numberOfGroups >= 0
+    && structure.groupSize >= 0
+    && (info.numericValues?.length ?? 0) === 2) {
+    const product = structure.numberOfGroups * structure.groupSize;
+    if (Number.isSafeInteger(product)) return { answer: product, source: 'repeated-groups' };
+  }
+
+  if (family === 'calculate'
+    && structure.unknownPosition === 'result'
+    && Number.isFinite(structure.startValue)
+    && Number.isFinite(structure.change)
+    && ['addition', 'subtraction'].includes(structure.operation)
+    && (info.numericValues?.length ?? 0) === 2) {
+    const signedChange = structure.operation === 'subtraction' ? -structure.change : structure.change;
+    const answer = structure.startValue + signedChange;
+    if (Number.isFinite(answer)) return { answer, source: 'direct-change' };
+  }
+
+  return null;
 }
 
 /**
@@ -1077,20 +1299,33 @@ export function analyseQuestion(input, overrides = {}) {
     ? overrides.confidence
     : interpretationConfidence(info, questionFamily, structure, domains, equation);
   const numerical = numericCharacteristics(info, source, structure);
+  const compoundSignals = compoundTaskSignals(info, source);
+  const directCalculation = directBinaryAnswer(source, info, questionFamily);
+  const exactArithmeticAnswer = directCalculation
+    || (equation?.privateDerivedAnswer !== null && equation?.privateDerivedAnswer !== undefined);
   const needsReview = confidence === 'low'
     || info.operations.length > 1
-    || info.divisionInterpretation === 'ambiguous'
+    || (info.divisionInterpretation === 'ambiguous' && !exactArithmeticAnswer)
     || info.hasExistingRepresentation
     || (info.subparts?.length ?? 0) > 1
     || ['find-error', 'correct-error'].includes(questionFamily)
     || (questionFamily === 'round' && !structure.rounding)
     || (questionFamily === 'draw-hands' && (info.times?.length ?? 0) !== 1)
+    || compoundSignals.length > 0
+    || (questionFamily === 'calculate-duration' && !Number.isFinite(structure.measurement?.durationMinutes))
     || (questionFamily === 'word-problem' && !structure.comparison && !structure.numberOfGroups && !structure.whole);
   const status = info.hasExistingRepresentation
     ? 'needs-referenced-visual'
-    : (info.subparts?.length ?? 0) > 1 || info.operations.length > 1
+    : compoundSignals.length > 0 || (info.subparts?.length ?? 0) > 1 || info.operations.length > 1
       ? 'compound'
       : needsReview ? 'ambiguous' : 'resolved';
+  const derived = confidence === 'high'
+    && status === 'resolved'
+    && !needsReview
+    && compoundSignals.length === 0
+    && !info.hasExistingRepresentation
+    ? derivedAnswerForResolvedQuestion({ source, info, family: questionFamily, structure, equation, directCalculation })
+    : null;
   return {
     version: 2,
     sourceText: info.rawText ?? source,
@@ -1105,10 +1340,9 @@ export function analyseQuestion(input, overrides = {}) {
     confidence,
     needsReview,
     status,
+    compoundSignals,
     correctionOptions: ['domain', 'operation', 'questionFamily', 'unknownPosition', 'representationPurpose'],
-    privateDerived: equation?.privateDerivedAnswer === null || equation?.privateDerivedAnswer === undefined
-      ? null
-      : { answer: equation.privateDerivedAnswer, source: 'simple-equation', pupilVisible: false },
+    privateDerived: derived ? { ...derived, pupilVisible: false } : null,
     equation,
     parserWarnings: [...(info.warnings ?? [])],
   };
@@ -1175,6 +1409,12 @@ function rankedIdealCandidates(interpretation) {
       add('place-value-counters', 82, 'Offers a countable concrete alternative without relying on colour.');
       add('base-ten', 76, 'Shows powers-of-ten units where the visual quantity remains manageable.');
     }
+  }
+
+  if (Number.isFinite(structure.originalValue)
+    && Number.isInteger(structure.multiplier)
+    && Number.isFinite(structure.scaledValue)) {
+    add('scaling-bar', 103, 'Binds the known original, multiplicative scale factor and protected result without substituting defaults.');
   }
 
   if (structure.comparison) {

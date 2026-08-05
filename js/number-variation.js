@@ -498,6 +498,8 @@ function constructAddition(analysis, seed) {
     const candidates = [];
     for (const leftDigit of digitChoices(left, leftWidth, position)) {
       for (const rightDigit of digitChoices(right, rightWidth, position)) {
+        if ((leftDigit === 0) !== (originalLeftDigits[position] === 0)
+          || (rightDigit === 0) !== (originalRightDigits[position] === 0)) continue;
         const carryOut = leftDigit + rightDigit + carryIn >= 10 ? 1 : 0;
         if (carryOut === desiredCarry) candidates.push({ leftDigit, rightDigit });
       }
@@ -542,6 +544,8 @@ function constructSubtraction(analysis, seed) {
     const candidates = [];
     for (const topDigit of digitChoices(minuend, topWidth, position)) {
       for (const bottomDigit of digitChoices(subtrahend, bottomWidth, position)) {
+        if ((topDigit === 0) !== (originalTopDigits[position] === 0)
+          || (bottomDigit === 0) !== (originalBottomDigits[position] === 0)) continue;
         const borrowOut = topDigit - borrowIn < bottomDigit ? 1 : 0;
         if (borrowOut === desiredBorrow) candidates.push({ topDigit, bottomDigit });
       }
@@ -595,6 +599,9 @@ function constructMultiplication(analysis, seed, options) {
   const multiplierOptions = preserveMultiplier ? [multiplier] : [1, 2, 3, 4, 5, 6, 7, 8, 9];
   const range = sameWidthRange(multiplicandWidth, multiplicand === 0);
   const desiredProfile = analysis.structure.carryProfile?.signature;
+  const originalZeroMask = String(Math.abs(multiplicand)).padStart(multiplicandWidth, '0')
+    .split('')
+    .map((digit) => digit === '0');
   if (!range || !desiredProfile) return null;
   const candidates = [];
   for (const candidateMultiplier of multiplierOptions) {
@@ -604,6 +611,10 @@ function constructMultiplication(analysis, seed, options) {
     for (let offset = 0; offset < checks; offset += 1) {
       const candidateMultiplicand = range.min + ((start + offset) % checks);
       if (candidateMultiplicand === multiplicand && candidateMultiplier === multiplier) continue;
+      const candidateZeroMask = String(candidateMultiplicand).padStart(multiplicandWidth, '0')
+        .split('')
+        .map((digit) => digit === '0');
+      if (candidateZeroMask.some((zero, index) => zero !== originalZeroMask[index])) continue;
       const profile = multiplicationCarryProfile(candidateMultiplicand, candidateMultiplier);
       if (profile?.signature !== desiredProfile) continue;
       candidates.push({ multiplicand: candidateMultiplicand, multiplier: candidateMultiplier });
@@ -776,7 +787,7 @@ export function createSafeNumberVariation(questionText, options = {}) {
         { ...analysis.slots[0], value: formatLike(variation.left, analysis.slots[0].raw) },
         { ...analysis.slots[1], value: formatLike(variation.right, analysis.slots[1].raw) },
       ];
-      preserved = ['direct addition', 'operand digit widths', 'carry profile'];
+      preserved = ['direct addition', 'operand digit widths', 'zero-placeholder positions', 'carry profile'];
     }
   } else if (analysis.type === 'subtraction') {
     variation = constructSubtraction(analysis, seed);
@@ -785,7 +796,7 @@ export function createSafeNumberVariation(questionText, options = {}) {
         { ...analysis.slots[0], value: formatLike(variation.minuend, analysis.slots[0].raw) },
         { ...analysis.slots[1], value: formatLike(variation.subtrahend, analysis.slots[1].raw) },
       ];
-      preserved = ['direct subtraction', 'operand digit widths', 'borrow profile'];
+      preserved = ['direct subtraction', 'operand digit widths', 'zero-placeholder positions', 'borrow profile'];
     }
   } else if (analysis.type === 'multiplication') {
     variation = constructMultiplication(analysis, seed, options);
@@ -794,7 +805,7 @@ export function createSafeNumberVariation(questionText, options = {}) {
         { ...analysis.slots[0], value: formatLike(variation.left, analysis.slots[0].raw) },
         { ...analysis.slots[1], value: formatLike(variation.right, analysis.slots[1].raw) },
       ];
-      preserved = ['direct multiplication', 'one-digit multiplier', 'multiplicand digit width', 'carry profile'];
+      preserved = ['direct multiplication', 'one-digit multiplier', 'multiplicand digit width', 'zero-placeholder positions', 'carry profile'];
     }
   } else if (analysis.type === 'division') {
     variation = constructDivision(analysis, seed);

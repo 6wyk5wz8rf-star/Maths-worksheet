@@ -20,6 +20,7 @@ import {
 } from '../js/question-intelligence.js';
 import { matchQuestionToModels } from '../js/matcher.js';
 import { validateRecipe } from '../js/model-registry.js';
+import { parseQuestions } from '../js/parser.js';
 
 test('rational helpers keep Year 4 fractions exact instead of using decimal arithmetic', () => {
   assert.deepEqual(parseRational('1.25'), { numerator: 5, denominator: 4 });
@@ -349,4 +350,157 @@ test('matcher delegates to the new interpretation layer while retaining a curren
   assert.equal(match.suggestions[0].family, 'rounding-number-line');
   assert.equal(match.suggestions[0].idealFamily, 'rounding-number-line');
   assert.ok(match.extracted.interpretation.answerProtection.prohibitedAutoFill.includes('rounded-value'));
+});
+
+test('interval-sized number lines retain their exact supplied scale', () => {
+  const source = 'Mark 275 on a number line from 250 to 300 in intervals of 5.';
+  assert.deepEqual(parseNumberLinePrompt(source), {
+    start: 250,
+    end: 300,
+    divisions: 10,
+    step: 5,
+    target: 275,
+  });
+  const match = matchQuestionToModels(source);
+  assert.deepEqual(match.provisionalRecipe?.values.ticks, [250, 255, 260, 265, 270, 275, 280, 285, 290, 295, 300]);
+  assert.deepEqual(match.provisionalRecipe?.values.markers, [{ value: 275, label: '275' }]);
+});
+
+test('an integer target and endpoints derive the smallest exact equal-interval scale', () => {
+  const source = 'Mark 2,750 on a number line from 2,000 to 3,000.';
+  assert.deepEqual(parseNumberLinePrompt(source), {
+    start: 2000,
+    end: 3000,
+    divisions: 4,
+    step: 250,
+    target: 2750,
+  });
+  const match = matchQuestionToModels(source);
+  assert.equal(match.confidence, 'high');
+  assert.equal(match.provisionalRecipe?.family, 'number-line');
+  assert.deepEqual(match.provisionalRecipe?.values.ticks, [2000, 2250, 2500, 2750, 3000]);
+  assert.equal(match.provisionalRecipe?.unknown, 'marker:0');
+  assert.equal(match.provisionalRecipe?.purpose, 'response-model');
+});
+
+test('fraction addition cannot be reinterpreted as division by a slash', () => {
+  const source = 'Complete: 3/4 + 1/4 = ___.';
+  assert.equal(parseSimpleEquation(source), null);
+  const interpretation = analyseQuestion(source);
+  assert.equal(interpretation.curriculumDomain, 'Fractions');
+  assert.notEqual(interpretation.equation?.operator, 'division');
+  assert.notEqual(matchQuestionToModels(source).suggestions[0]?.family, 'equation-balance');
+});
+
+test('mixed-number equalities stop for review instead of losing the whole number', () => {
+  const match = matchQuestionToModels('Complete: 1 1/2 = □/2.');
+  assert.equal(match.interpretation.status, 'compound');
+  assert.equal(match.interpretation.needsReview, true);
+  assert.equal(match.provisionalRecipe, null);
+});
+
+test('explicit am and pm allow a truthful next-day duration', () => {
+  for (const source of [
+    'How long is it from 11:50 pm to 12:10 am?',
+    'How long is it from 23:50 to 00:10?',
+  ]) {
+    const interpretation = analyseQuestion(source);
+    assert.equal(interpretation.mathematicalStructure.measurement.durationMinutes, 20, source);
+    assert.equal(interpretation.mathematicalStructure.measurement.crossesMidnight, true, source);
+    const recipe = matchQuestionToModels(source).provisionalRecipe;
+    assert.equal(recipe?.values.startMinutes, 1430, source);
+    assert.equal(recipe?.values.endMinutes, 1450, source);
+  }
+});
+
+test('a proportional calculation binds source values rather than model defaults', () => {
+  for (const source of [
+    'Calculate 3 times as many as 12.',
+    'Amy has 12 stickers. Ben has 3 times as many as Amy. How many stickers does Ben have?',
+    'A ribbon is three times as long as a 12 cm ribbon. How long is it?',
+  ]) {
+    const match = matchQuestionToModels(source);
+    assert.equal(match.provisionalRecipe?.family, 'scaling-bar', source);
+    assert.equal(match.provisionalRecipe?.values.original, 12, source);
+    assert.equal(match.provisionalRecipe?.values.multiplier, 3, source);
+    assert.equal(match.provisionalRecipe?.values.scaled, 36, source);
+    assert.equal(match.provisionalRecipe?.unknown, 'scaled-value', source);
+  }
+});
+
+test('the shipped sample receives only its three exact, closed answers', () => {
+  const sample = `Place value
+
+1. What is the value of the digit 4 in 3,482? [1 mark]
+2. Partition 6,407 in two different ways.
+3. Mark 2,750 on a number line from 2,000 to 3,000.
+
+Calculations
+
+4. Calculate 4,003 − 1,786. [2 marks]
+5. There are 6 bags with 8 apples in each bag. How many apples are there altogether?
+6. Shade 3/8 of the fraction strip.`;
+  const readings = parseQuestions(sample).questions.map((question) => matchQuestionToModels(question));
+  const answers = readings.map((reading) => reading.interpretation.privateDerived);
+  assert.deepEqual(answers, [
+    { answer: 400, source: 'digit-value', pupilVisible: false },
+    null,
+    null,
+    { answer: 2217, source: 'direct-calculation', pupilVisible: false },
+    { answer: 48, source: 'repeated-groups', pupilVisible: false },
+    null,
+  ]);
+  for (const index of [0, 3, 4]) {
+    assert.equal(readings[index].confidence, 'high');
+    assert.equal(readings[index].interpretation.status, 'resolved');
+    assert.equal(readings[index].interpretation.needsReview, false);
+  }
+});
+
+test('resolved single-task calculations derive exact private answers', () => {
+  const cases = [
+    ['Calculate 245 + 178.', 423, 'direct-calculation'],
+    ['Calculate 4,003 − 1,786.', 2217, 'direct-calculation'],
+    ['Calculate 23 × 4.', 92, 'direct-calculation'],
+    ['Calculate 56 ÷ 8.', 7, 'direct-calculation'],
+    ['□ ÷ 8 = 7', 56, 'simple-equation'],
+    ['Round 3,450 to the nearest 100.', 3500, 'rounding'],
+    ['How long is it from 23:50 to 00:10?', 20, 'duration'],
+    ['Amy has 12 stickers. Ben has 3 times as many as Amy. How many does Ben have?', 36, 'scaling'],
+    ['What is 100 more than 3,456?', 3556, 'direct-change'],
+  ];
+  for (const [source, answer, answerSource] of cases) {
+    const interpretation = analyseQuestion(source);
+    assert.equal(interpretation.confidence, 'high', source);
+    assert.equal(interpretation.privateDerived?.answer, answer, source);
+    assert.equal(interpretation.privateDerived?.source, answerSource, source);
+    assert.equal(interpretation.privateDerived?.pupilVisible, false, source);
+  }
+});
+
+test('private answer derivation fails closed for ambiguous, compound and response tasks', () => {
+  const sources = [
+    'Partition 6,407 in two different ways.',
+    'Mark 2,750 on a number line from 2,000 to 3,000.',
+    'Shade 3/8 of the fraction strip.',
+    'Calculate 245 + 178 and 620 + 389.',
+    '□ × 7 = 56 and □ × 8 = 64.',
+    'Complete □ × 7 = 56 and explain your reasoning.',
+    'What is the value of the digit 4 in 3,482? Explain how you know.',
+    'Calculate 245 + 178, then round the answer to the nearest 10.',
+    'Calculate 245 + 178 and add 10.',
+    'There are 6 bags with 8 apples each. How many apples and how many bags are there?',
+    'What is the value of the digit 4 in 4,434?',
+    'Round each number to the nearest 10: 36, 74 and 128.',
+    'Calculate 7 ÷ 2.',
+    'Calculate 3/4 + 1/4.',
+    'Use the diagram to calculate 24 ÷ 6.',
+    'There are 6 bags with 8 apples each and 2 loose apples. How many apples are there altogether?',
+  ];
+  for (const source of sources) {
+    assert.equal(analyseQuestion(source).privateDerived, null, source);
+  }
+
+  const subparts = parseQuestions('1. a. Calculate 245 + 178.\n   b. Calculate 620 + 389.').questions[0];
+  assert.equal(analyseQuestion(subparts).privateDerived, null);
 });

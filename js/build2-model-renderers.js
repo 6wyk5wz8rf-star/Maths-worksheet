@@ -669,10 +669,17 @@ function renderClock(recipe, definition, options) {
   const hour = ((integer(recipe.values.hour, 0) % 24) + 24) % 24; const minute = ((integer(recipe.values.minute, 0) % 60) + 60) % 60; const cx = 250; const cy = 120; const r = 78;
   const content = [`<circle cx="${cx}" cy="${cy}" r="${r}" fill="#fff" stroke="${ink}" stroke-width="3"/>`];
   for (let i = 0; i < 12; i += 1) { const angle = (i / 12) * Math.PI * 2 - Math.PI / 2; const x1 = cx + Math.cos(angle) * (r - 4); const y1 = cy + Math.sin(angle) * (r - 4); const x2 = cx + Math.cos(angle) * (r - 14); const y2 = cy + Math.sin(angle) * (r - 14); content.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${ink}" stroke-width="2"/>${svgText(cx + Math.cos(angle) * (r - 25), cy + Math.sin(angle) * (r - 25) + 5, i === 0 ? 12 : i, { size: 11, weight: 700 })}`); }
-  if (recipe.values.showHands !== false && !hidden(recipe, 'hands', options)) { const minuteA = minute / 60 * Math.PI * 2 - Math.PI / 2; const hourA = ((hour % 12) + minute / 60) / 12 * Math.PI * 2 - Math.PI / 2; content.push(`<line x1="${cx}" y1="${cy}" x2="${cx + Math.cos(hourA) * 43}" y2="${cy + Math.sin(hourA) * 43}" stroke="${ink}" stroke-width="5" stroke-linecap="round"/><line x1="${cx}" y1="${cy}" x2="${cx + Math.cos(minuteA) * 63}" y2="${cy + Math.sin(minuteA) * 63}" stroke="#4f568f" stroke-width="3" stroke-linecap="round"/><circle cx="${cx}" cy="${cy}" r="5" fill="${ink}"/>`); }
+  const handsVisible = recipe.values.showHands !== false && !hidden(recipe, 'hands', options);
+  if (handsVisible) { const minuteA = minute / 60 * Math.PI * 2 - Math.PI / 2; const hourA = ((hour % 12) + minute / 60) / 12 * Math.PI * 2 - Math.PI / 2; content.push(`<line x1="${cx}" y1="${cy}" x2="${cx + Math.cos(hourA) * 43}" y2="${cy + Math.sin(hourA) * 43}" stroke="${ink}" stroke-width="5" stroke-linecap="round"/><line x1="${cx}" y1="${cy}" x2="${cx + Math.cos(minuteA) * 63}" y2="${cy + Math.sin(minuteA) * 63}" stroke="#4f568f" stroke-width="3" stroke-linecap="round"/><circle cx="${cx}" cy="${cy}" r="5" fill="${ink}"/>`); }
   const digital = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-  content.push(`<rect x="404" y="90" width="160" height="58" rx="9" fill="${pale}" stroke="${line}"/>${svgText(484, 127, recipe.values.showDigital && !hidden(recipe, 'digital-time', options) ? digital : '____', { size: 25, weight: 700 })}`);
-  return svgFrame(recipe, definition, content.join(''), options);
+  const digitalVisible = recipe.values.showDigital && !hidden(recipe, 'digital-time', options);
+  content.push(`<rect x="404" y="90" width="160" height="58" rx="9" fill="${pale}" stroke="${line}"/>${svgText(484, 127, digitalVisible ? digital : '____', { size: 25, weight: 700 })}`);
+  const accessibleDescription = handsVisible
+    ? describeBuild2Model(recipe)
+    : digitalVisible
+      ? `${definition.name}: a blank analogue clock face beside the digital time ${digital}.`
+      : `${definition.name}: a blank analogue clock face with no time completed.`;
+  return svgFrame(recipe, definition, content.join(''), { ...options, accessibleDescription });
 }
 
 function timeLabel(minutes) {

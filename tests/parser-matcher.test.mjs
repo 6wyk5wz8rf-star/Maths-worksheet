@@ -196,22 +196,26 @@ test('matches a four-digit digit-value question to a populated place-value recip
   assert.deepEqual(result.provisionalRecipe.values.digits.map((entry) => entry.digit), [3, 4, 8, 2]);
 });
 
-test('matches explicit base-ten and partition tasks without fabricating a solution', () => {
+test('matches explicit base-ten and partition tasks without automatically completing them', () => {
   const base = matchModels('Use Dienes blocks to represent 2,304.');
   assert.equal(base.suggestions[0].family, 'base-ten');
-  assert.equal(base.provisionalRecipe.values.thousands, 2);
-  assert.equal(base.provisionalRecipe.values.hundreds, 3);
-  assert.equal(base.provisionalRecipe.values.tens, 0);
-  assert.equal(base.provisionalRecipe.values.ones, 4);
+  assert.equal(base.suggestions[0].recipe.values.thousands, 2);
+  assert.equal(base.suggestions[0].recipe.values.hundreds, 3);
+  assert.equal(base.suggestions[0].recipe.values.tens, 0);
+  assert.equal(base.suggestions[0].recipe.values.ones, 4);
+  assert.equal(base.provisionalRecipe, null);
 
   const partition = matchModels('Partition 5,206.');
   assert.equal(partition.suggestions[0].family, 'partition');
-  assert.deepEqual(partition.provisionalRecipe.values.parts, [5000, 200, 6]);
+  assert.deepEqual(partition.suggestions[0].recipe.values.parts, [5000, 200, 6]);
+  assert.equal(partition.provisionalRecipe, null);
 });
 
 test('number-line recipes preserve consistent intervals', () => {
   const result = matchModels('Mark 350 on a number line from 300 to 400.');
   const recipe = result.suggestions[0].recipe;
+  assert.equal(result.confidence, 'high');
+  assert.equal(result.provisionalRecipe?.family, 'number-line');
   assert.equal(recipe.family, 'number-line');
   assert.equal(recipe.values.start, 300);
   assert.equal(recipe.values.end, 400);
@@ -219,6 +223,8 @@ test('number-line recipes preserve consistent intervals', () => {
   const differences = recipe.values.ticks.slice(1)
     .map((tick, index) => Number((tick - recipe.values.ticks[index]).toFixed(8)));
   assert.ok(differences.every((difference) => difference === differences[0]));
+  assert.equal(recipe.values.divisions, 2);
+  assert.equal(recipe.unknown, 'marker:0');
 });
 
 test('mixed fraction location lines retain exact endpoints, intervals and a blank pupil target', () => {
@@ -282,12 +288,16 @@ test('distinguishes sharing, grouping and ambiguous symbolic division', () => {
   assert.equal(sharing.suggestions[0].recipe.values.total, 24);
   assert.equal(sharing.suggestions[0].recipe.values.groups, 6);
   assert.equal(sharing.suggestions[0].recipe.unknown, 'group-size');
+  assert.equal(sharing.confidence, 'high');
+  assert.equal(sharing.provisionalRecipe?.family, 'sharing-division');
+  assert.equal(sharing.suggestions.some((suggestion) => suggestion.family === 'equal-groups'), false);
 
   const grouping = matchModels('How many groups of 6 can be made from 48 counters?');
   assert.equal(grouping.suggestions[0].family, 'grouping-division');
   assert.equal(grouping.suggestions[0].recipe.values.total, 48);
   assert.equal(grouping.suggestions[0].recipe.values.groupSize, 6);
   assert.equal(grouping.suggestions[0].recipe.unknown, 'group-count');
+  assert.equal(grouping.suggestions.some((suggestion) => suggestion.family === 'equal-groups'), false);
 
   const ambiguous = matchModels('Calculate 48 ÷ 6.');
   assert.equal(ambiguous.confidence, 'medium');
@@ -467,4 +477,90 @@ test('direct more-or-less transformations use a truthful change model', () => {
   assert.equal(decrease.provisionalRecipe?.values.change, -1000);
   assert.equal(decrease.provisionalRecipe?.values.result, 6230);
   assert.equal(decrease.provisionalRecipe?.unknown, 'result');
+});
+
+test('dotted pasted subparts are retained and force compound review', () => {
+  const parsed = parseQuestions('1. a. Calculate 245 + 178.\n   b. Calculate 620 + 389.');
+  assert.deepEqual(parsed.questions[0].mathInfo.subparts.map((part) => part.label), ['a', 'b']);
+
+  const match = matchQuestionToModels(parsed.questions[0]);
+  assert.equal(match.interpretation.status, 'compound');
+  assert.equal(match.interpretation.needsReview, true);
+  assert.equal(match.provisionalRecipe, null);
+});
+
+test('parallel calculations, comparison pairs and line targets fail closed', () => {
+  const sources = [
+    'Calculate 245 + 178 and 620 + 389.',
+    'Put <, > or = between each pair: 3,405 ___ 3,450; 6,000 ___ 5,999.',
+    'Mark 1/2 and 3/4 on a number line from 0 to 1 divided into quarters.',
+    'A rectangle is 7 cm long and 4 cm wide. Find its area and perimeter.',
+  ];
+  for (const source of sources) {
+    const match = matchQuestionToModels(source);
+    assert.equal(match.interpretation.status, 'compound', source);
+    assert.equal(match.interpretation.needsReview, true, source);
+    assert.equal(match.provisionalRecipe, null, source);
+    assert.equal(match.noModelRecommended, true, source);
+  }
+});
+
+test('matcher returns only complete valid recipes at its public boundary', () => {
+  const missingTime = matchQuestionToModels('Draw the hands to show the time.');
+  assert.ok(missingTime.suggestions.every((suggestion) => suggestion.recipe), 'null recipes must never reach the UI');
+
+  const oversizedChart = matchQuestionToModels('Draw a bar chart to show 1 cats, 2 dogs, 3 fish, 4 birds, 5 ants, 6 bees, 7 foxes, 8 owls and 9 bats.');
+  assert.deepEqual(oversizedChart.suggestions, []);
+  assert.equal(oversizedChart.provisionalRecipe, null);
+  assert.equal(oversizedChart.noModelRecommended, true);
+
+  const oversizedLabelFirst = matchQuestionToModels('Draw a bar chart using this data: A 1, B 2, C 3, D 4, E 5, F 6, G 7, H 8, I 9.');
+  assert.deepEqual(oversizedLabelFirst.suggestions, []);
+  assert.equal(oversizedLabelFirst.provisionalRecipe, null);
+});
+
+test('label-first chart data binds every source row without inventing defaults', () => {
+  for (const source of [
+    'Draw a bar chart using this data: Cats: 4, Dogs: 6, Fish: 3.',
+    'Draw a bar chart using this data: Cats 4, Dogs 6, Fish 3.',
+  ]) {
+    const match = matchQuestionToModels(source);
+    assert.equal(match.provisionalRecipe?.family, 'bar-chart', source);
+    assert.deepEqual(match.provisionalRecipe.values.rows, [
+      { label: 'Cats', value: 4 },
+      { label: 'Dogs', value: 6 },
+      { label: 'Fish', value: 3 },
+    ], source);
+  }
+});
+
+test('explicit response tasks remain pupil work rather than automatic answers', () => {
+  for (const source of [
+    'Draw an array to show 4 × 6.',
+    'Use Dienes blocks to represent 2,304.',
+    'Draw a fraction strip to represent 3/4.',
+    'Draw a bar model to show 245 + 178.',
+  ]) {
+    const match = matchQuestionToModels(source);
+    assert.equal(match.provisionalRecipe, null, source);
+    assert.equal(match.noModelRecommended, true, source);
+    assert.match(match.warnings.join(' '), /left as working space/i, source);
+  }
+});
+
+test('common repeated-group and grouping wording receives the correct operation', () => {
+  assert.deepEqual(extractMathInfo('Each of 5 boxes has 8 pencils. How many pencils are there altogether?').operations, ['multiplication']);
+  assert.deepEqual(extractMathInfo('A box contains 6 packs of 8 pencils. How many pencils are there altogether?').operations, ['multiplication']);
+  const grouping = extractMathInfo('24 apples are put into bags of 6. How many bags are needed?');
+  assert.deepEqual(grouping.operations, ['division']);
+  assert.equal(grouping.divisionInterpretation, 'grouping');
+});
+
+test('referenced geometry and measure visuals never receive invented replacements', () => {
+  for (const source of ['What type of triangle is shown?', 'Name the angle shown.', 'How much water is shown in the jug?']) {
+    const match = matchQuestionToModels(source);
+    assert.equal(match.extracted.hasExistingRepresentation, true, source);
+    assert.equal(match.interpretation.status, 'needs-referenced-visual', source);
+    assert.deepEqual(match.suggestions, [], source);
+  }
 });

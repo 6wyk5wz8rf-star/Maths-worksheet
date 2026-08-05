@@ -6,14 +6,14 @@ import {
   normalisePurpose,
   presetSettings,
   purposeToIntent,
-} from './worksheet-architecture.js?v=release-v4';
+} from './worksheet-architecture.js?v=release-v5';
 import {
   createPresetVariant,
   createVariant,
   deriveVersionOverrides,
   normaliseVersions,
   resolveWorksheetVersion,
-} from './worksheet-versions.js?v=release-v4';
+} from './worksheet-versions.js?v=release-v5';
 
 /**
  * Maths Page Studio worksheet state.
@@ -104,6 +104,11 @@ export function createId(prefix = 'item') {
   const time = Date.now().toString(36);
   const random = Math.random().toString(36).slice(2, 9);
   return `${prefix}_${time}_${fallbackIdCounter.toString(36)}_${random}`;
+}
+
+export function reorderInsertionIndex(sourceIndex, targetIndex, insertAfter = false) {
+  if (!Number.isInteger(sourceIndex) || !Number.isInteger(targetIndex) || sourceIndex < 0 || targetIndex < 0) return -1;
+  return targetIndex + (insertAfter ? 1 : 0) - (sourceIndex < targetIndex ? 1 : 0);
 }
 
 export function cloneValue(value) {

@@ -1,6 +1,6 @@
 # Maths Page Studio
 
-Maths Page Studio turns copied mathematical questions into accurate, editable and printable A4 worksheets. The release product keeps one calm journey—**Paste → Check → Compose → Print**—with guided page architecture, purposeful pupil working space, linked differentiation versions and a print check that protects pupil and teacher output.
+Maths Page Studio turns copied mathematical questions into accurate, editable and printable A4 worksheets. The release product keeps one calm journey: paste questions, review only uncertain readings, adjust the paper where it matters, and print. The worksheet is the main screen; model, spacing and working-space controls appear only for the selected question.
 
 ## Run locally
 
@@ -18,17 +18,18 @@ The application is served from the repository root. Keep production asset paths 
 
 ```bash
 npm test
+npm run build
 ```
 
 The test suite covers parsing, question interpretation and recommendation rules, model integrity, constrained value variation, worksheet architecture and versions, state history, persistence failures and migration, A4 pagination, accessibility contracts and GitHub Pages/offline-shell checks.
 
-Run the test suite before publishing. The deployment test verifies that every statically imported local module is pre-cached and that the HTML, manifest and worker retain project-relative paths.
+Run both gates before publishing. The deployment test verifies that every statically imported local module is pre-cached and that the HTML, manifest and worker retain project-relative paths. The production build also copies the service worker, manifest and stable application icon into `dist/`.
 
 ## Structure
 
 - `index.html` — semantic application shell and dialogs
 - `css/styles.css` — responsive editor, A4 worksheet and dedicated print styles
-- `js/app.js` — four-stage interface, Compose controls and interaction orchestration
+- `js/app.js` — page-led interface, contextual controls and interaction orchestration
 - `js/parser.js` — lossless question import and mathematical extraction
 - `js/matcher.js` — deterministic local model matching
 - `js/model-registry.js` — central declarations for the expandable mathematical model bank
@@ -49,7 +50,7 @@ The deployed product is:
 
 `https://6wyk5wz8rf-star.github.io/Maths-worksheet/`
 
-Use the trailing slash: GitHub Pages redirects the slashless path to it. The service worker pre-caches the application shell with a product-scoped release namespace, so an update cannot remove caches belonging to another project on the same GitHub Pages origin. Bump the release token and cache namespace together whenever the shell or local module graph changes.
+Use the trailing slash: GitHub Pages redirects the slashless path to it. The service worker pre-caches the application shell with a product-scoped release namespace, so an update cannot remove caches belonging to another project on the same GitHub Pages origin. Bump the release token and cache namespace together whenever the shell or local module graph changes. The current shell token is `release-v5`.
 
 ## Privacy
 

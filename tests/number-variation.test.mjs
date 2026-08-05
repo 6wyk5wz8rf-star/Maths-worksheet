@@ -137,3 +137,18 @@ test('a seed gives repeatable output without changing the source question', () =
   assert.equal(source, 'Calculate 3,482 + 2,135. [2 marks]');
   assert.match(first.questionText, /\[2 marks\]$/);
 });
+
+test('variation preserves zero-placeholder positions as well as operation profiles', () => {
+  const addition = createSafeNumberVariation('Calculate 4,005 + 2,103.', { seed: 0 });
+  assert.equal(addition.changed, true);
+  assert.match(String(addition.values.left), /^\d00\d$/);
+  assert.match(String(addition.values.right), /^\d\d0\d$/);
+
+  const multiplication = createSafeNumberVariation('Calculate 2,040 × 3.', { seed: 0 });
+  assert.equal(multiplication.changed, true);
+  assert.match(String(multiplication.values.multiplicand), /^\d0\d0$/);
+  assert.equal(
+    multiplicationCarryProfile(multiplication.values.multiplicand, multiplication.values.multiplier).signature,
+    analyseSupportedVariation('Calculate 2,040 × 3.').structure.carryProfile.signature,
+  );
+});
