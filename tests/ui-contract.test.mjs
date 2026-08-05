@@ -16,13 +16,14 @@ test('GitHub Pages shell uses only local relative production assets', async () =
   await Promise.all(urls.filter((url) => url.startsWith('./')).map((url) => access(new URL(url.slice(2), root))));
 });
 
-test('the four quiet stages and one dominant paste action are present', async () => {
+test('the teacher gets one direct paste action instead of a clickable stage dashboard', async () => {
   const html = await source('index.html');
-  for (const stage of ['paste', 'check', 'make', 'print']) assert.match(html, new RegExp(`data-stage-target="${stage}"`));
+  assert.doesNotMatch(html, /data-stage-target=/);
   const app = await source('js/app.js');
   assert.match(app, /Paste your questions/);
-  assert.match(app, /Make my worksheet/);
-  assert.match(app, /Ready to print/);
+  assert.match(app, /Create worksheet/);
+  assert.match(app, /function renderMake\(/);
+  assert.match(app, /function renderPrint\(/);
 });
 
 test('first-draft composition is one atomic structure and style command', async () => {
@@ -63,20 +64,47 @@ test('release UI keeps worksheet controls contextual and tablet navigation reach
   assert.match(css, /\.mobile-panel-tabs\s*\{\s*display:\s*none;/);
   assert.match(css, /\.mobile-navigator-sheet\s*\{[\s\S]*?display:\s*none;/);
   assert.match(css, /\.mobile-navigator-sheet\.is-open\s*\{\s*display:\s*block;/);
-  assert.match(css, /\.make-layout\s*\{[\s\S]*?grid-template-columns:\s*minmax\(420px, 1fr\) 320px;/);
+  assert.match(css, /\.make-layout\s*\{[\s\S]*?display:\s*block;/);
+  assert.match(css, /\.inspector\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?display:\s*none;/);
+  assert.match(css, /\.inspector\.is-open\s*\{\s*display:\s*block;/);
 
-  const tabletStart = css.indexOf('@media (max-width: 980px)');
-  const narrowStart = css.indexOf('@media (max-width: 760px)');
-  const tabletCss = css.slice(tabletStart, narrowStart);
-  assert.match(tabletCss, /\.mobile-panel-tabs\s*\{[\s\S]*?display:\s*grid;/);
-  assert.match(tabletCss, /\.mobile-navigator-sheet\.is-open\s*\{\s*display:\s*block;/);
-  assert.match(tabletCss, /\.make-toolbar\s*\{[\s\S]*?height:\s*108px;/);
+  const finalTabletStart = css.lastIndexOf('@media (max-width: 980px)');
+  const bottomSheetStart = css.indexOf('@media (max-width: 820px)', finalTabletStart);
+  const tabletCss = css.slice(finalTabletStart, bottomSheetStart);
+  assert.match(tabletCss, /\.mobile-panel-tabs\s*\{\s*display:\s*none;/);
+  assert.match(tabletCss, /\.make-toolbar\s*\{[\s\S]*?height:\s*60px;/);
+  assert.match(tabletCss, /\.make-layout\s*\{[\s\S]*?display:\s*block;/);
   assert.doesNotMatch(css, /\.view-toggle\s*\{\s*display:\s*none;/);
   assert.doesNotMatch(css, /\.card-tools \.move-tool\s*\{\s*display:\s*none;/);
-  assert.match(app, /data-action="create-workbook-version"/);
-  assert.match(app, /Workbook cut-outs needs \$\{pagination\.pageCount\} pages at a readable size\. Nothing has been shrunk\./);
-  assert.match(app, /data-key="size" data-value="extra-large"/);
+  assert.match(app, /data-action="set-sheet-format" data-value="workbook"/);
+  assert.match(app, /Workbook cut-outs need \$\{pagination\.pageCount\} pages at a readable size\. Nothing has been shrunk\./);
+  assert.match(app, /data-role="model-size-select"/);
+  assert.match(app, /value="extra-large"/);
+  assert.match(app, /function questionNeedsReview/);
   assert.match(app, /function readableQuestionFamily/);
+});
+
+test('automatic reanalysis fails closed and reopening workbook format preserves its edits', async () => {
+  const app = await source('js/app.js');
+  const safeBinding = app.slice(app.indexOf('function safeBoundRecipe'), app.indexOf('function reanalyseQuestionBlock'));
+  assert.match(safeBinding, /match\.confidence === 'high'/);
+  assert.match(safeBinding, /match\.interpretation\?\.status === 'resolved'/);
+  assert.match(safeBinding, /match\.suggestions\.some\(\(suggestion\) => suggestion\.family === currentFamily && suggestion\.recipe\)/);
+
+  const workbook = app.slice(app.indexOf('function createWorkbookCutoutVersion'), app.indexOf('function renderProjectList'));
+  assert.match(workbook, /if \(existing\)[\s\S]*?reconcileWorkbookCutoutVariant\(master, existing\)/);
+  assert.match(workbook, /reconciled !== existing[\s\S]*?updateVersion\(existing\.id, \{ overrides: reconciled\.overrides \}\)/);
+  assert.match(workbook, /setActiveVersion\(existing\.id\)/);
+  assert.match(app, /if \(isWorkbookSheet\(store\.getState\(\)\)\) return;/);
+  const loadRefresh = app.slice(app.indexOf('function refreshAutomaticReadingsOnLoad'), app.indexOf('function buildFirstDraft'));
+  assert.match(loadRefresh, /modelBindingMode\(block\.model\) === 'bound' && !teacherChoseModel/);
+  assert.match(loadRefresh, /safeBoundRecipe\(match, worksheet\)/);
+  assert.match(loadRefresh, /reconcileWorkbookCutoutVariant\(refreshedWorksheet, version\)/);
+  assert.match(loadRefresh, /store\.replaceBaseline\(\{ \.\.\.refreshedWorksheet, versions \}\)/);
+  assert.doesNotMatch(loadRefresh, /dispatchMaster\(/);
+  const projectLoad = app.slice(app.indexOf("action === 'load-project'"), app.indexOf("action === 'duplicate-project'"));
+  assert.match(projectLoad, /store\.load\(id\)[\s\S]*?refreshAutomaticReadingsOnLoad\(\)/);
+  assert.match(app, /refreshAutomaticReadingsOnLoad\(\);\s*store\.subscribe/);
 });
 
 test('tablet sheets expose their state and move focus into and back from the active region', async () => {
@@ -84,9 +112,9 @@ test('tablet sheets expose their state and move focus into and back from the act
   assert.match(app, /id="mobile-question-navigator" role="region" aria-labelledby="mobile-question-navigator-title" tabindex="-1"/);
   assert.match(app, /id="question-inspector"[\s\S]*?role="region" aria-labelledby="question-inspector-title" tabindex="-1"/);
   assert.match(app, /data-action="open-navigator" aria-controls="mobile-question-navigator" aria-expanded="\$\{ui\.navigatorOpen\}"/);
-  assert.match(app, /data-action="open-inspector" aria-controls="question-inspector" aria-expanded="\$\{ui\.inspectorOpen\}"/);
-  assert.match(app, /function openMobilePanel\(panelName\)[\s\S]*?render\(\);[\s\S]*?focusAfterRender\(`#\$\{CSS\.escape\(config\.id\)\}`\);/);
-  assert.match(app, /function closeMobilePanels\(\)[\s\S]*?render\(\);[\s\S]*?focusAfterRender\(`\[data-action="\$\{CSS\.escape\(returnAction\)\}"\]`\);/);
+  assert.match(app, /ui\.selectedId = worksheetBlock\.dataset\.blockId;[\s\S]*?openMobilePanel\('inspector'\);/);
+  assert.match(app, /function openMobilePanel\(panelName, returnSelector = null\)[\s\S]*?render\(\);[\s\S]*?focusAfterRender\(`#\$\{CSS\.escape\(config\.id\)\}`\);/);
+  assert.match(app, /function closeMobilePanels\(\)[\s\S]*?render\(\);[\s\S]*?focusAfterRender\(returnSelector\);/);
   assert.match(app, /event\.key === 'Escape'[\s\S]*?closeMobilePanels\(\)/);
 });
 
@@ -115,7 +143,7 @@ test('editing keeps native undo, focus and save failure feedback', async () => {
   assert.match(app, /footprintForPattern\(target\.value, block\)/, 'Choosing a block structure must update its real footprint.');
 
   const switches = [...app.matchAll(/<label class="switch"><input type="checkbox"([^>]*)>/g)];
-  assert.ok(switches.length >= 10);
+  assert.ok(switches.length >= 4, 'Only meaningful switches should remain in the quiet interface.');
   assert.ok(switches.every((match) => /aria-label=/.test(match[1])), 'Every custom switch needs an accessible name.');
 });
 

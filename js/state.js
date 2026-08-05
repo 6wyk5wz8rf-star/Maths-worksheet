@@ -6,14 +6,14 @@ import {
   normalisePurpose,
   presetSettings,
   purposeToIntent,
-} from './worksheet-architecture.js?v=release-v3';
+} from './worksheet-architecture.js?v=release-v4';
 import {
   createPresetVariant,
   createVariant,
   deriveVersionOverrides,
   normaliseVersions,
   resolveWorksheetVersion,
-} from './worksheet-versions.js?v=release-v3';
+} from './worksheet-versions.js?v=release-v4';
 
 /**
  * Maths Page Studio worksheet state.
@@ -1127,11 +1127,20 @@ export function worksheetReducer(state, action, options = {}) {
       const index = versions.items.findIndex((item) => item.id === versionId && item.id !== 'master');
       const inner = action.action;
       if (index < 0 || !inner || typeof inner.type !== 'string' || inner.type === ActionTypes.APPLY_VERSION_ACTION) break;
+      const current = versions.items[index];
       const base = { ...state, versions };
       const effective = resolveWorksheetVersion(base, versionId);
       const adjusted = worksheetReducer(effective, { ...inner, timestamp: action.timestamp }, options);
       if (adjusted === effective) break;
       const overrides = deriveVersionOverrides(base, adjusted);
+      // Workbook reconciliation metadata describes the master snapshot used
+      // to create the linked format. Re-deriving sparse overrides for an
+      // ordinary workbook edit must not discard that provenance, otherwise a
+      // later master addition can cause deliberately reset blocks to be
+      // compacted again.
+      for (const key of ['workbookMasterBlockIds', 'workbookMasterBlockKinds', 'workbookAutoHiddenBlockIds']) {
+        if (current.overrides?.[key] != null) overrides[key] = cloneValue(current.overrides[key]);
+      }
       const items = [...versions.items];
       items[index] = { ...items[index], overrides };
       next = { ...state, versions: { ...versions, items } };
@@ -1367,6 +1376,16 @@ export function duplicateProject(sourceOrId, options = {}, storage = getDefaultS
     overrides.hiddenBlockIds = remapIdList(overrides.hiddenBlockIds, idMap);
     overrides.addedBlocks = (overrides.addedBlocks ?? []).map((block) => remapBlockReferences(block, idMap));
     overrides.order = Array.isArray(overrides.order) ? remapIdList(overrides.order, idMap) : null;
+    overrides.workbookMasterBlockIds = Array.isArray(overrides.workbookMasterBlockIds)
+      ? remapIdList(overrides.workbookMasterBlockIds, idMap)
+      : null;
+    overrides.workbookMasterBlockKinds = overrides.workbookMasterBlockKinds && typeof overrides.workbookMasterBlockKinds === 'object'
+      ? Object.fromEntries(Object.entries(overrides.workbookMasterBlockKinds)
+        .map(([id, kind]) => [remapId(id, idMap), kind]))
+      : null;
+    overrides.workbookAutoHiddenBlockIds = Array.isArray(overrides.workbookAutoHiddenBlockIds)
+      ? remapIdList(overrides.workbookAutoHiddenBlockIds, idMap)
+      : null;
     overrides.pageArrangement = remapPageArrangementReferences(overrides.pageArrangement, idMap);
     overrides.architecture = remapArchitectureReferences(overrides.architecture, idMap);
     return { ...version, id: nextId, overrides };
@@ -1472,6 +1491,22 @@ export function createStore(initialWorksheet, options = {}) {
     return true;
   }
 
+  /**
+   * Install a loaded or repaired worksheet as the new history baseline.
+   *
+   * This is intentionally separate from reducer dispatch: a migration is not
+   * a teacher edit, and Undo must never be able to restore the stale payload it
+   * replaced. Validation happens before history is cleared, so a malformed
+   * replacement leaves both the current worksheet and its history untouched.
+   */
+  function replaceBaseline(nextWorksheet, reason = 'replace-baseline') {
+    const next = tryMigrateWorksheet(nextWorksheet, { now, idFactory });
+    if (!next) return false;
+    past = [];
+    future = [];
+    return commit(next, reason, null, false);
+  }
+
   const store = {
     getState: () => state,
     dispatch(action) {
@@ -1514,14 +1549,13 @@ export function createStore(initialWorksheet, options = {}) {
       setPersistenceStatus('saving');
       return completeSave();
     },
+    replaceBaseline(nextWorksheet) {
+      return replaceBaseline(nextWorksheet);
+    },
     replace(nextWorksheet, { clearHistory = true } = {}) {
+      if (clearHistory) return replaceBaseline(nextWorksheet, 'replace');
       const next = tryMigrateWorksheet(nextWorksheet, { now, idFactory });
-      if (!next) return false;
-      if (clearHistory) {
-        past = [];
-        future = [];
-      }
-      return commit(next, 'replace', null, !clearHistory);
+      return next ? commit(next, 'replace', null, true) : false;
     },
     load(projectId) {
       const loaded = loadProject(projectId, storage, { now, idFactory });

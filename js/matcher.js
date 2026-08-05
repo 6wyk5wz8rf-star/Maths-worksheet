@@ -1,5 +1,5 @@
 import { extractMathInfo } from './parser.js';
-import { analyseQuestion, parseNumberLinePrompt, rankModelRecommendations } from './question-intelligence.js';
+import { analyseQuestion, isModelContraindicated, parseNumberLinePrompt, rankModelRecommendations } from './question-intelligence.js';
 import { createModelRecipe as createRegisteredRecipe, getModelDefinition, listModelDefinitions } from './model-registry.js';
 
 /** Slugs are stable recipe identifiers shared by matching and rendering. */
@@ -66,6 +66,11 @@ function scoreConfidence(score) {
   if (score >= 82) return 'high';
   if (score >= 58) return 'medium';
   return 'low';
+}
+
+function lowerConfidence(left, right) {
+  const rank = { low: 0, medium: 1, high: 2 };
+  return (rank[left] ?? 0) <= (rank[right] ?? 0) ? left : right;
 }
 
 function familyCandidate(family, score, reason, explicit = false) {
@@ -195,7 +200,9 @@ function mergeIntelligentCandidates(candidates, interpretation) {
     availableFamilies: listModelDefinitions().map((definition) => definition.id),
     limit: 8,
   });
-  const merged = candidates.map((candidate) => ({ ...candidate }));
+  const merged = candidates
+    .filter((candidate) => !isModelContraindicated(candidate.family, interpretation))
+    .map((candidate) => ({ ...candidate }));
   // The newer fraction-line renderer represents a legacy 0-to-whole scale.
   // For mixed-number location and benchmark-distance tasks, use the mature
   // editable number-line renderer until that renderer can express arbitrary
@@ -536,6 +543,24 @@ function moneyValueNear(source, pattern) {
   return Number.isFinite(pounds) && Number.isFinite(pence) ? pounds * 100 + pence : null;
 }
 
+function chartRowsFromText(source) {
+  const rows = [];
+  const cleaned = String(source ?? '')
+    .replace(/\[[^\]]*marks?[^\]]*\]|\([^)]*marks?[^)]*\)/gi, ' ')
+    .replace(/[.?!]+$/g, '');
+  const pattern = /\b(\d+(?:,\d{3})*(?:\.\d+)?)\s+([a-z][a-z -]*?)(?=\s*(?:,|;|\band\b|$))/gi;
+  for (const match of cleaned.matchAll(pattern)) {
+    const value = Number(match[1].replaceAll(',', ''));
+    const label = match[2]
+      .replace(/\b(?:votes?|items?|children|people|pupils?|responses?)\s*$/i, '')
+      .trim();
+    if (!Number.isFinite(value) || !label || /^(?:bar\s+chart|chart|graph)$/i.test(label)) continue;
+    rows.push({ label: label.replace(/\b\w/g, (letter) => letter.toUpperCase()), value });
+    if (rows.length === 8) break;
+  }
+  return rows;
+}
+
 /** Translate intelligence vocabulary into the exact renderer blanks. */
 function protectedTokensFor(family, interpretation) {
   const structure = interpretation?.mathematicalStructure ?? {};
@@ -641,10 +666,13 @@ function build2ValuesFor(family, info, interpretation) {
     }
   }
   if (family.includes('column') || family.includes('multiplication') || family.includes('division') || family === 'array-structure' || family === 'equal-groups') {
+    const arithmeticOperands = structure.startValue !== null && structure.change !== null
+      ? [structure.startValue, Math.abs(structure.change)]
+      : values.slice(0, 3);
     Object.assign(base, {
-      left: first,
-      right: second,
-      operands: values.slice(0, 3),
+      left: arithmeticOperands[0],
+      right: arithmeticOperands[1],
+      operands: arithmeticOperands,
       groups: structure.numberOfGroups ?? (positive[0] ?? 2),
       groupSize: structure.groupSize ?? (positive[1] ?? 2),
       total: structure.whole ?? null,
@@ -660,13 +688,18 @@ function build2ValuesFor(family, info, interpretation) {
     });
   }
   if (family === 'comparison-bar' || family === 'change-bar' || family === 'scaling-bar') {
+    const signedChange = structure.operation === 'subtraction'
+      ? -Math.abs(structure.change ?? second)
+      : Math.abs(structure.change ?? second);
+    const changeStart = structure.startValue ?? first;
     Object.assign(base, {
       greater: structure.comparison?.greater ?? Math.max(first, second),
       lesser: structure.comparison?.lesser ?? Math.min(first, second),
       difference: structure.comparison?.difference ?? null,
-      start: structure.startValue ?? first,
-      change: structure.change ?? second,
-      result: structure.endValue ?? null,
+      start: changeStart,
+      change: family === 'change-bar' ? signedChange : structure.change ?? second,
+      result: family === 'change-bar' ? changeStart + signedChange : structure.endValue ?? null,
+      direction: signedChange < 0 ? 'decrease' : 'increase',
     });
   }
   if (family === 'clock-model') {
@@ -713,8 +746,18 @@ function build2ValuesFor(family, info, interpretation) {
       toUnit: measure.toUnit ?? 'cm',
     });
   }
+  if (family === 'ordering-comparison-line') {
+    Object.assign(base, {
+      numbers: values,
+      showSymbols: false,
+      order: 'given',
+    });
+  }
   if (['bar-chart', 'pictogram', 'line-graph', 'tally-frequency-table'].includes(family) && structure.chart?.construction) {
-    Object.assign(base, { rows: [], max: 10, yMax: 10, showPoints: false });
+    const rows = chartRowsFromText(interpretation?.normalisedText ?? info.analysedText);
+    const dataMaximum = Math.max(0, ...rows.map((row) => row.value));
+    const scaleMaximum = Math.max(5, Math.ceil(dataMaximum / 5) * 5);
+    Object.assign(base, { rows, max: scaleMaximum, yMax: scaleMaximum, showPoints: false });
   }
   return Object.fromEntries(Object.entries(base).filter(([, value]) => value !== null && value !== undefined));
 }
@@ -731,8 +774,13 @@ function createBuild2Recipe(family, info, options) {
     ? requestedCompletion(intent, options.completionState)
     : constructionTask ? 'blank' : requestedCompletion(intent, options.completionState);
   const hidden = protectedTokensFor(family, interpretation);
+  const values = build2ValuesFor(family, info, interpretation);
+  if (constructionTask
+    && ['bar-chart', 'pictogram', 'line-graph', 'tally-frequency-table'].includes(family)
+    && !(values.rows?.length)) return null;
+  if (constructionTask && family === 'clock-model' && (info.times?.length ?? 0) !== 1) return null;
   return createRegisteredRecipe(family, {
-    values: build2ValuesFor(family, info, interpretation),
+    values,
     unknown: primaryUnknownFor(family, interpretation, hidden),
     hidden,
     scaffoldState: completionState === 'blank' ? 'blank' : scaffoldStateFor(intent, options.completionState),
@@ -979,6 +1027,15 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
     warnings.push('The question appears to refer to a representation already provided; check before adding a duplicate model.');
   }
 
+  // A referenced visual is source data, not a request for a fresh generic
+  // model. Creating a recipe here would fill the missing clock, chart, table
+  // or shape with registry defaults and could silently change the question.
+  // Keep the question intact and require an explicit teacher repair instead.
+  if (interpretation.status === 'needs-referenced-visual') {
+    candidates = [];
+    warnings.push('The referenced visual is missing, so no replacement model has been suggested.');
+  }
+
   const suggestions = candidates.slice(0, 3).map((candidate) => {
     const recipe = createModelRecipe(candidate.family, info, { ...options, intent, interpretation });
     const leak = evaluateAnswerLeak(recipe, { intent, interpretation });
@@ -1004,6 +1061,7 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
   let confidence = !top ? 'low' : scoreConfidence(top.score);
   if (confidence === 'high' && !top.explicit && suggestions.length > 1 && gap < 7) confidence = 'medium';
   if (clarification || info.hasExistingRepresentation) confidence = confidence === 'low' ? 'low' : 'medium';
+  confidence = lowerConfidence(confidence, interpretation.confidence);
 
   if (intent === 'assessment' && top?.answerRevealRisk !== 'none') {
     warnings.push('Assessment mode has kept this model provisional because it may reveal the operation or solution structure.');
@@ -1024,13 +1082,23 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
   const safeHighMatch = confidence === 'high'
     && top?.recipe
     && !clarification
+    && interpretation.status === 'resolved'
+    && !interpretation.needsReview
     && !info.hasExistingRepresentation
     && top.answerRevealRisk !== 'high'
     && (intent !== 'assessment' || assessmentAllowsBlankExplicitResponse);
 
   const provisionalRecipe = safeHighMatch ? top.recipe : null;
-  const noModelRecommended = !top || confidence === 'low' || info.hasExistingRepresentation;
-  if (!top) warnings.push('No model can be matched reliably; leaving the question unmodelled is safest.');
+  const noModelRecommended = !top?.recipe
+    || confidence === 'low'
+    || interpretation.status !== 'resolved'
+    || info.hasExistingRepresentation
+    || interpretation.needsReview
+    || intelligent.ranked.noModelRecommended;
+  if (interpretation.needsReview && top) {
+    warnings.push('The mathematical reading needs review, so no model has been attached automatically.');
+  }
+  if (!top?.recipe) warnings.push('No model can be matched reliably; leaving the question unmodelled is safest.');
 
   return {
     confidence,

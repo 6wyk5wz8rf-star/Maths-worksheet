@@ -20,6 +20,21 @@ const UNIT_PATTERN =
 const NUMBER_TOKEN_SOURCE =
   '[\u2212-]?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?';
 
+const CLOCK_HOUR_WORDS = Object.freeze({
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+});
+
 const MARK_PATTERNS = [
   /\[\s*(\d+)\s*(?:marks?|m)\s*\]/gi,
   /\(\s*(\d+)\s*(?:marks?|m)\s*\)/gi,
@@ -400,6 +415,24 @@ function detectWords(source, definitions) {
   return matches;
 }
 
+/**
+ * `each` is common classroom instruction language ("check each answer",
+ * "compare each pair") and is not, by itself, evidence of multiplication.
+ * Only promote it when the surrounding clause actually supplies a repeated
+ * quantity relationship.
+ */
+function hasMultiplicativeEachContext(source) {
+  const number = NUMBER_TOKEN_SOURCE;
+  const item = '[A-Za-z][A-Za-z\u2019\'-]*';
+  const patterns = [
+    new RegExp(`\\b${number}\\s+${item}(?:\\s+${item}){0,2}\\s+(?:with|holding|containing|of)\\s+${number}\\b[^.?!\\n]*\\b(?:in\\s+)?each\\b`, 'i'),
+    new RegExp(`\\b${number}\\s+${item}(?:\\s+${item}){0,2}\\s+each\\s+(?:has|have|holds?|contains?|gets?|costs?|weighs?|measures?|needs?)\\s+${number}\\b`, 'i'),
+    new RegExp(`\\beach\\s+${item}(?:\\s+${item}){0,2}\\s+(?:has|have|holds?|contains?|gets?|costs?|weighs?|measures?|needs?)\\s+${number}\\b`, 'i'),
+    new RegExp(`\\b${number}\\s+${item}(?:\\s+${item}){0,2}\\s+(?:are|is|were|was)?\\s*(?:placed|put|packed|shared|given)?\\s*(?:in|into|for)\\s+each\\s+(?:of\\s+)?${number}\\b`, 'i'),
+  ];
+  return patterns.some((pattern) => pattern.test(source));
+}
+
 /** Extract deterministic mathematical signals without changing the question. */
 export function extractMathInfo(text) {
   const rawText = String(text ?? '');
@@ -426,6 +459,34 @@ export function extractMathInfo(text) {
       if (meridiem === 'pm' && hours !== 12) hours += 12;
       if (meridiem === 'am' && hours === 12) hours = 0;
       return { raw: match[0], hours, sourceHours, minutes, meridiem, value: match[0] };
+    }
+  );
+
+  // Common UK primary clock wording carries an exact time even when it has no
+  // digits. Parse only unambiguous quarter/half-hour forms; looser language is
+  // deliberately left for teacher review rather than converted by guesswork.
+  collectPattern(
+    source,
+    /\b(quarter|half)\s+(past|to)\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|(?:1[0-2]|[1-9]))\b/gi,
+    'time',
+    occupied,
+    quantities,
+    (match) => {
+      const fraction = match[1].toLowerCase();
+      const direction = match[2].toLowerCase();
+      if (fraction === 'half' && direction === 'to') return null;
+      const namedHour = CLOCK_HOUR_WORDS[match[3].toLowerCase()] ?? Number(match[3]);
+      if (!Number.isInteger(namedHour) || namedHour < 1 || namedHour > 12) return null;
+      const minutes = fraction === 'half' ? 30 : direction === 'past' ? 15 : 45;
+      const sourceHours = direction === 'to' ? ((namedHour + 10) % 12) + 1 : namedHour;
+      return {
+        raw: match[0],
+        hours: sourceHours,
+        sourceHours,
+        minutes,
+        meridiem: null,
+        value: `${sourceHours}:${String(minutes).padStart(2, '0')}`,
+      };
     }
   );
 
@@ -494,7 +555,7 @@ export function extractMathInfo(text) {
 
   collectPattern(
     source,
-    new RegExp(`${NUMBER_TOKEN_SOURCE}(?:\\s*${UNIT_PATTERN})?`, 'gi'),
+    new RegExp(`${NUMBER_TOKEN_SOURCE}(?:\\s*${UNIT_PATTERN}(?![A-Za-z]))?`, 'gi'),
     'number',
     occupied,
     quantities,
@@ -535,15 +596,27 @@ export function extractMathInfo(text) {
   let operationLanguage = detectWords(source, [
     ['addition', /\b(?:add|added|addition|altogether|combined|in all|sum|total)\b/i],
     ['subtraction', /\b(?:subtract|subtraction|take away|difference|remain(?:ing)?|left over|fewer)\b/i],
-    ['multiplication', /\b(?:multiply|multiplication|product|times|groups? of|lots? of|rows? of|each)\b/i],
+    ['multiplication', /\b(?:multiply|multiplication|product|times|groups? of|lots? of|rows? of)\b/i],
     ['division', /\b(?:divide|division|share|shared|sharing|equally|groups? can|groups? are)\b/i]
   ]);
+  if (hasMultiplicativeEachContext(source) && !operationLanguage.includes('multiplication')) {
+    operationLanguage.push('multiplication');
+  }
   const clearDivisionContext = /\b(?:share|shared|sharing|divide|division|how many\s+groups?|groups?\s+can\s+be\s+made)\b/i.test(source);
   if (clearDivisionContext && !operationLanguage.includes('division')) operationLanguage.push('division');
   if (clearDivisionContext && !/\b(?:multiply|multiplication|product|times)\b|\u00d7/i.test(source)) {
     operationLanguage = operationLanguage.filter((operation) => operation !== 'multiplication');
   }
-  const clearMultiplicationContext = /\b(?:multiply|multiplication|product|times|groups? of|rows? of|lots? of)\b|\u00d7/i.test(source);
+  // In a sharing/grouping question, "left over" names the division
+  // remainder; it is not evidence of a second subtraction step. Preserve a
+  // genuine compound reading when subtraction is stated independently.
+  const divisionRemainderContext = clearDivisionContext && /\b(?:remainder|left over)\b/i.test(source);
+  const explicitSubtractionContext = /\b(?:subtract|subtraction|take away|difference|fewer)\b|\d\s*[\u2212-]\s*\d/i.test(source);
+  if (divisionRemainderContext && !explicitSubtractionContext) {
+    operationLanguage = operationLanguage.filter((operation) => operation !== 'subtraction');
+  }
+  const clearMultiplicationContext = /\b(?:multiply|multiplication|product|times|groups? of|rows? of|lots? of)\b|\u00d7/i.test(source)
+    || hasMultiplicativeEachContext(source);
   if (clearMultiplicationContext
     && !/\b(?:add|added|addition|sum|combined|in all)\b|\+/i.test(source)) {
     operationLanguage = operationLanguage.filter((operation) => operation !== 'addition');
@@ -577,8 +650,20 @@ export function extractMathInfo(text) {
     else divisionInterpretation = 'ambiguous';
   }
 
-  const hasExistingRepresentation =
-    /\b(?:diagram|model|chart|number line|array|grid|table)\s+(?:below|above|shown|provided)\b|\bshown in the (?:diagram|model|chart|number line|array|grid|table)\b/i.test(source);
+  const representationNoun = '(?:diagram|model|chart|graph|pictogram|number line|array|grid|table|clock|shape|thermometer|scale|ruler|picture|image|figure)';
+  const hasExistingRepresentation = [
+    new RegExp(`\\b${representationNoun}\\s+(?:below|above|shown|provided|given)\\b`, 'i'),
+    new RegExp(`\\bshown\\s+(?:in|on|by)\\s+(?:the|this|that|these|those)\\s+${representationNoun}\\b`, 'i'),
+    new RegExp(`\\b(?:use|read|look\\s+at|refer\\s+to|from)\\s+(?:the|this|that|these|those|following)\\s+${representationNoun}\\b`, 'i'),
+    new RegExp(`\\b(?:the|this|that|these|those)\\s+${representationNoun}\\s+(?:shows?|represents?|gives?|contains?|has|is)\\b`, 'i'),
+    new RegExp(`\\b(?:what|which|how\\s+many|how\\s+much)\\b[^.?!\\n]*\\b(?:this|that|the)\\s+${representationNoun}\\b`, 'i'),
+    new RegExp('\\b(?:use|read)\\s+(?:the\\s+)?information\\s+(?:in|on|from)\\s+(?:the|this|that|following)\\s+' + representationNoun + '\\b', 'i'),
+    new RegExp('\\b(?:complete|fill\\s+in)\\s+(?:the|this|that|following)\\s+' + representationNoun + '\\b', 'i'),
+    /\bwhat\s+time\s+(?:is|was)\s+(?:shown|displayed|indicated)\b/i,
+    /^\s*what\s+time\s+is\s+it\s*[?.!]?\s*$/i,
+    /\bwhat\s+fraction\b[^.?!\n]*\b(?:is|has\s+been)\s+(?:shaded|colou?red|highlighted)\b/i,
+    /\b(?:underlined|shaded|colou?red|highlighted)\s+(?:digit|number|part|section|region|shape)\b|\b(?:digit|number|part|section|region|shape)\s+(?:underlined|shaded|colou?red|highlighted)\b/i,
+  ].some((pattern) => pattern.test(source));
 
   const domainScores = new Map();
   const scoreDomain = (domain, score) => domainScores.set(domain, (domainScores.get(domain) || 0) + score);
@@ -589,7 +674,7 @@ export function extractMathInfo(text) {
   if (units.length) scoreDomain('measurement', 4);
   if (times.length || /\b(?:time|clock|minutes?|hours?)\b/i.test(source)) scoreDomain('time', 5);
   if (/\b(?:shape|angle|perimeter|area|vertex|vertices|parallel|perpendicular)\b/i.test(source)) scoreDomain('geometry', 5);
-  if (/\b(?:table|chart|graph|data|frequency)\b/i.test(source)) scoreDomain('statistics', 4);
+  if (/\b(?:chart|graph|pictogram|data|frequency|tally)\b|\b(?:use|read|complete)\s+the\s+table\b|\btable\s+(?:below|above|shown|provided|gives?|shows?)\b/i.test(source)) scoreDomain('statistics', 4);
   const likelyDomains = [...domainScores]
     .map(([domain, score]) => ({ domain, score }))
     .sort((a, b) => b.score - a.score || a.domain.localeCompare(b.domain));

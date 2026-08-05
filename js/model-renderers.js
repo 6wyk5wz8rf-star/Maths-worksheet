@@ -17,10 +17,13 @@ const SIZE_BOXES = Object.freeze({
 // ratio, but leaves most of the printable width unused. These boxes preserve
 // the mathematical geometry while letting the actual line fill the page.
 const WIDE_SIZE_BOXES = Object.freeze({
-  compact: { width: 620, height: 116 },
+  // Large choices deliberately use a tighter coordinate system. At a fixed
+  // printable page width this enlarges the complete line, its ticks and its
+  // labels instead of merely reserving extra blank height.
+  compact: { width: 980, height: 112 },
   standard: { width: 900, height: 120 },
-  large: { width: 1060, height: 126 },
-  'extra-large': { width: 1220, height: 136 },
+  large: { width: 760, height: 132 },
+  'extra-large': { width: 660, height: 148 },
 });
 
 function escapeMarkup(value) {

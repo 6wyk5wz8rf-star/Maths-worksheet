@@ -8,6 +8,7 @@
 
 const VERSION_TYPES = new Set(['master', 'supported', 'standard', 'assessment', 'homework', 'teacher-model', 'answer', 'custom']);
 const OUTPUT_VIEWS = new Set(['pupil', 'teacher', 'answer']);
+const WORKBOOK_BLOCK_KINDS = new Set(['question', 'heading', 'instruction']);
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -56,6 +57,19 @@ function uniqueStrings(values) {
   return [...new Set((Array.isArray(values) ? values : []).filter((value) => typeof value === 'string'))];
 }
 
+function workbookBlockKind(value) {
+  return WORKBOOK_BLOCK_KINDS.has(value) ? value : 'question';
+}
+
+function normaliseWorkbookMasterBlockKinds(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([id, kind]) => typeof id === 'string'
+      && !['__proto__', 'prototype', 'constructor'].includes(id)
+      && WORKBOOK_BLOCK_KINDS.has(kind))
+    .map(([id, kind]) => [id, kind]));
+}
+
 const VALID_STYLE_PRESETS = new Set(['calm', 'clear', 'compact', 'guided', 'assessment', 'homework']);
 const VALID_RESPONSE_TYPES = new Set([
   'none', 'short-answer', 'answer-box', 'calculation-area', 'squared-working',
@@ -92,6 +106,7 @@ function normaliseResolvedSettings(value, fallback = {}) {
     sectionStyle: ['plain', 'line', 'band', 'stage'].includes(source.sectionStyle) ? source.sectionStyle : (fallback.sectionStyle ?? 'line'),
     bodyScale: ['small', 'standard', 'large'].includes(source.bodyScale) ? source.bodyScale : (fallback.bodyScale ?? 'standard'),
     lineWeight: ['light', 'standard', 'strong'].includes(source.lineWeight) ? source.lineWeight : (fallback.lineWeight ?? 'light'),
+    workbookMode: safeBoolean(source.workbookMode, fallback.workbookMode ?? false),
     showNameField: safeBoolean(source.showNameField, fallback.showNameField ?? true),
     showDateField: safeBoolean(source.showDateField, fallback.showDateField ?? true),
     showClassField: safeBoolean(source.showClassField, fallback.showClassField ?? false),
@@ -118,7 +133,9 @@ function normaliseResolvedBlock(value, fallback = {}) {
     kind: ['question', 'heading', 'instruction'].includes(source.kind) ? source.kind : (base.kind ?? 'question'),
     originalText: asText(source.originalText, asText(base.originalText)),
     displayText: asText(source.displayText, asText(base.displayText)),
-    section: typeof source.section === 'string' ? source.section : (typeof base.section === 'string' ? base.section : null),
+    section: Object.hasOwn(source, 'section')
+      ? (typeof source.section === 'string' ? source.section : null)
+      : (typeof base.section === 'string' ? base.section : null),
     source: mergeValue(asObject(base.source), asObject(source.source)),
     extracted: mergeValue(asObject(base.extracted), asObject(source.extracted)),
     model: rawModel === null ? null : (rawModel && typeof rawModel === 'object' && !Array.isArray(rawModel) ? cloneValue(rawModel) : cloneValue(base.model ?? null)),
@@ -226,6 +243,9 @@ export function createEmptyOverrides() {
     addedBlocks: [],
     order: null,
     outputView: null,
+    workbookMasterBlockIds: null,
+    workbookMasterBlockKinds: null,
+    workbookAutoHiddenBlockIds: null,
   };
 }
 
@@ -243,6 +263,13 @@ export function normaliseVersionOverrides(value) {
     addedBlocks: Array.isArray(source.addedBlocks) ? source.addedBlocks.filter((block) => block && typeof block === 'object').map(cloneValue) : [],
     order: Array.isArray(source.order) ? uniqueStrings(source.order) : null,
     outputView: OUTPUT_VIEWS.has(source.outputView) ? source.outputView : null,
+    workbookMasterBlockIds: Array.isArray(source.workbookMasterBlockIds)
+      ? uniqueStrings(source.workbookMasterBlockIds)
+      : null,
+    workbookMasterBlockKinds: normaliseWorkbookMasterBlockKinds(source.workbookMasterBlockKinds),
+    workbookAutoHiddenBlockIds: Array.isArray(source.workbookAutoHiddenBlockIds)
+      ? uniqueStrings(source.workbookAutoHiddenBlockIds)
+      : null,
   };
 }
 
@@ -492,8 +519,20 @@ export function createPresetVariant(master, type, options = {}) {
 }
 
 function workbookUsesAttachedModelAsResponse(block) {
-  if (block.model?.purpose === 'response-model') return true;
-  return /\b(?:mark|place|plot|shade|draw|label|complete)\b/i.test(String(block.displayText ?? ''));
+  // Wording alone is not enough to remove the pupil's answer space.  For
+  // example, "Complete the calculation" may have a thinking model beside it
+  // and still needs somewhere to calculate.  The attached recipe is the
+  // source of truth because matching/interpretation has already assigned its
+  // mathematical purpose.
+  return block.model?.purpose === 'response-model';
+}
+
+function workbookModelSize(model) {
+  if (!model) return null;
+  // Compact models are promoted to the normal readable print size.  A
+  // teacher's deliberate Large or Extra large choice is never downgraded in
+  // pursuit of a one-page result.
+  return model.size === 'compact' || !model.size ? 'standard' : model.size;
 }
 
 function compactWorkbookResponse(response = {}, modelIsResponse = false) {
@@ -504,6 +543,27 @@ function compactWorkbookResponse(response = {}, modelIsResponse = false) {
   // report that it needs another page if the writing space remains essential.
   if (extended.has(response.type)) return { ...response, size: 'compact' };
   return { ...response, type: 'short-answer', size: 'compact', customRows: 0, rows: 0, lines: 0 };
+}
+
+function compactWorkbookQuestion(block) {
+  const modelIsResponse = workbookUsesAttachedModelAsResponse(block);
+  return {
+    ...block,
+    section: null,
+    model: block.model ? { ...block.model, size: workbookModelSize(block.model), position: 'beneath' } : null,
+    response: compactWorkbookResponse(block.response, modelIsResponse),
+    composition: {
+      ...(block.composition ?? {}),
+      pattern: 'compact-question',
+      footprint: 'half',
+      keepWithNext: false,
+      startOnNewPage: false,
+      hint: '',
+      sentenceStem: '',
+      vocabulary: [],
+    },
+    layout: { ...(block.layout ?? {}), columnSpan: 'half', keepWithNext: false, manualBreakBefore: false, pageHint: 0 },
+  };
 }
 
 /**
@@ -521,6 +581,7 @@ export function createWorkbookCutoutVariant(master, options = {}) {
   const target = cloneValue(base);
   target.settings = {
     ...target.settings,
+    workbookMode: true,
     columns: 2,
     density: 'compact',
     bodyScale: 'small',
@@ -537,6 +598,10 @@ export function createWorkbookCutoutVariant(master, options = {}) {
   target.architecture = {
     ...target.architecture,
     compositionMode: 'rows',
+    // Workbook packing is a fresh physical arrangement.  Source section flow
+    // and "start on a new page" rules must not leak into this one-page mode.
+    sections: [],
+    stylePreset: 'compact',
     header: {
       ...(target.architecture?.header ?? {}),
       layout: 'compact',
@@ -551,33 +616,15 @@ export function createWorkbookCutoutVariant(master, options = {}) {
     },
     footer: { ...(target.architecture?.footer ?? {}), fields: [] },
   };
-  target.pageArrangement = { ...target.pageArrangement, manualBreakBefore: [] };
+  // `null` is an explicit sparse-version reset; an empty object would merge
+  // with inherited override keys rather than removing them.
+  target.pageArrangement = { ...target.pageArrangement, manualBreakBefore: [], pageOverrides: null };
   target.outputView = 'pupil';
-  target.blocks = target.blocks.map((block) => {
-    if (block.kind !== 'question') {
-      return {
-        ...block,
-        composition: { ...(block.composition ?? {}), footprint: 'compact', keepWithNext: true },
-        layout: { ...(block.layout ?? {}), columnSpan: 'full', keepWithNext: true, manualBreakBefore: false, pageHint: 0 },
-      };
-    }
-    const modelIsResponse = workbookUsesAttachedModelAsResponse(block);
-    return {
-      ...block,
-      model: block.model ? { ...block.model, size: 'standard', position: 'beneath' } : null,
-      response: compactWorkbookResponse(block.response, modelIsResponse),
-      composition: {
-        ...(block.composition ?? {}),
-        pattern: 'compact-question',
-        footprint: 'half',
-        keepWithNext: false,
-        hint: '',
-        sentenceStem: '',
-        vocabulary: [],
-      },
-      layout: { ...(block.layout ?? {}), columnSpan: 'half', keepWithNext: false, manualBreakBefore: false, pageHint: 0 },
-    };
-  });
+  // Section headings and imported spacer/instruction cards are useful in the
+  // full worksheet but are decorative overhead on a sheet of trim-to-workbook
+  // question blocks.  The master remains untouched; these become sparse hidden
+  // block ids in the linked variant.
+  target.blocks = target.blocks.filter((block) => block.kind === 'question').map(compactWorkbookQuestion);
   const version = createVariant({}, {
     ...options,
     type: 'custom',
@@ -585,7 +632,172 @@ export function createWorkbookCutoutVariant(master, options = {}) {
     outputView: 'pupil',
   });
   version.overrides = deriveVersionOverrides(master, target);
+  // A sparse version otherwise cannot distinguish a later master addition
+  // from an original question that the teacher deliberately reset to master.
+  version.overrides.workbookMasterBlockIds = uniqueStrings((master.blocks ?? []).map((block) => block?.id));
+  // Stable IDs can survive a fresh interpretation while the block changes
+  // between question and decorative content. Persist the original kind so a
+  // later reconciliation can update visibility without guessing.
+  version.overrides.workbookMasterBlockKinds = normaliseWorkbookMasterBlockKinds(Object.fromEntries((master.blocks ?? [])
+    .filter((block) => block && typeof block.id === 'string')
+    .map((block) => [block.id, workbookBlockKind(block.kind)])));
+  version.overrides.workbookAutoHiddenBlockIds = uniqueStrings((master.blocks ?? [])
+    .filter((block) => block && typeof block.id === 'string' && workbookBlockKind(block.kind) !== 'question')
+    .map((block) => block.id));
   return version;
+}
+
+/**
+ * Bring later master additions into an existing Workbook cut-outs version
+ * without rebuilding that version or changing any of its teacher-authored
+ * sparse overrides. New decorative blocks are hidden; new questions receive
+ * only the same physical workbook defaults used at creation.
+ */
+export function reconcileWorkbookCutoutVariant(master, existingVersion) {
+  if (!existingVersion || typeof existingVersion !== 'object' || Array.isArray(existingVersion)) return existingVersion;
+
+  const overrides = normaliseVersionOverrides(existingVersion.overrides);
+  const isWorkbook = overrides.settings.workbookMode === true
+    || Array.isArray(overrides.workbookMasterBlockIds)
+    || overrides.workbookMasterBlockKinds !== null
+    || Array.isArray(overrides.workbookAutoHiddenBlockIds)
+    || existingVersion.name === 'Workbook cut-outs';
+  if (!isWorkbook) return existingVersion;
+
+  const masterBlocks = Array.isArray(master?.blocks)
+    ? master.blocks.filter((block) => block && typeof block === 'object' && typeof block.id === 'string')
+    : [];
+  const masterIds = new Set(masterBlocks.map((block) => block.id));
+  const recordedIds = Array.isArray(overrides.workbookMasterBlockIds)
+    ? new Set(overrides.workbookMasterBlockIds)
+    : null;
+  const recordedKinds = overrides.workbookMasterBlockKinds;
+  const recordedAutoHidden = Array.isArray(overrides.workbookAutoHiddenBlockIds)
+    ? new Set(overrides.workbookAutoHiddenBlockIds)
+    : null;
+  // The normal open/switch path must be a true no-op. Returning the exact
+  // object avoids creating an undo/autosave entry merely because a teacher
+  // chose an already-current Workbook cut-outs version. Both the ID and its
+  // recorded kind must match because interpretation may reuse a stable ID.
+  if (recordedIds && recordedKinds && recordedAutoHidden && masterBlocks.every((block) => (
+    recordedIds.has(block.id) && recordedKinds[block.id] === workbookBlockKind(block.kind)
+  ))) return existingVersion;
+
+  const knownIds = new Set((overrides.workbookMasterBlockIds ?? []).filter((id) => masterIds.has(id)));
+
+  // Versions created before the baseline marker can still be reconciled
+  // safely in the common case: every original workbook question had a patch,
+  // while original decorative blocks were hidden. Explicit edits/removals and
+  // order entries also prove that a block was already known to this version.
+  for (const id of Object.keys(overrides.blockPatches)) if (masterIds.has(id)) knownIds.add(id);
+  for (const id of overrides.hiddenBlockIds) if (masterIds.has(id)) knownIds.add(id);
+  for (const id of overrides.order ?? []) if (masterIds.has(id)) knownIds.add(id);
+  for (const block of overrides.addedBlocks) if (masterIds.has(block?.id)) knownIds.add(block.id);
+  if (!recordedIds && !recordedKinds) {
+    // With neither provenance field there is no safe way to tell a genuinely
+    // later question from an original question deliberately reset to master.
+    // Fail closed: preserve every current question as an existing workbook
+    // item, hide only current decorative blocks, and establish the baseline
+    // from which future additions can be reconciled precisely.
+    for (const block of masterBlocks) knownIds.add(block.id);
+  }
+
+  const hidden = new Set(overrides.hiddenBlockIds);
+  const autoHidden = new Set(overrides.workbookAutoHiddenBlockIds ?? []);
+  const blockPatches = cloneValue(overrides.blockPatches);
+  // Real pre-v4 workbook saves have no kind provenance and may have kept
+  // decorative blocks visible with ordinary patches. Migrate them by hiding
+  // every current non-question. For current questions, infer "question" so
+  // an ambiguous teacher-hidden question can never be exposed by migration.
+  const previousKinds = recordedKinds ? { ...recordedKinds } : Object.fromEntries(masterBlocks
+    .map((block) => [block.id, workbookBlockKind(block.kind)]));
+
+  for (const block of masterBlocks) {
+    const currentKind = workbookBlockKind(block.kind);
+    const previousKind = previousKinds[block.id] ?? null;
+    const kindChanged = knownIds.has(block.id) && previousKind !== null && previousKind !== currentKind;
+    const isNewMasterBlock = recordedIds ? !recordedIds.has(block.id) : false;
+
+    if (kindChanged && currentKind !== 'question') {
+      // A visible former question is being hidden by the system, so remember
+      // that ownership. If it was already hidden and was not auto-hidden, the
+      // teacher owns that state and a later round-trip must preserve it.
+      const wasHidden = hidden.has(block.id);
+      hidden.add(block.id);
+      if (!wasHidden) autoHidden.add(block.id);
+      continue;
+    }
+    if (kindChanged && previousKind !== 'question' && currentKind === 'question') {
+      // Replace any stale decorative patch with the current workbook
+      // transform. Reveal only a system-owned hide; a teacher-owned hide is
+      // deliberately retained.
+      if (autoHidden.has(block.id)) {
+        hidden.delete(block.id);
+        autoHidden.delete(block.id);
+      }
+      const patch = diffValue(block, compactWorkbookQuestion(block));
+      if (patch && typeof patch === 'object' && !Array.isArray(patch) && Object.keys(patch).length) blockPatches[block.id] = patch;
+      else delete blockPatches[block.id];
+      continue;
+    }
+
+    if (isNewMasterBlock) {
+      if (currentKind !== 'question') {
+        hidden.add(block.id);
+        autoHidden.add(block.id);
+        continue;
+      }
+      // If the teacher has already edited or hidden this inherited question,
+      // preserve that workbook-only decision. Otherwise apply the default
+      // compact transform exactly once.
+      if (knownIds.has(block.id)) continue;
+      const patch = diffValue(block, compactWorkbookQuestion(block));
+      if (patch && typeof patch === 'object' && !Array.isArray(patch) && Object.keys(patch).length) blockPatches[block.id] = patch;
+      continue;
+    }
+
+    if (knownIds.has(block.id)) {
+      // Legacy provenance cannot safely distinguish an old automatically
+      // hidden heading from a teacher-hidden question after a kind change.
+      // Hiding all current decorative blocks is safe; same-kind questions keep
+      // their exact teacher visibility and overrides.
+      if (currentKind !== 'question') {
+        hidden.add(block.id);
+        if (!recordedAutoHidden) autoHidden.add(block.id);
+      }
+      continue;
+    }
+    if (currentKind !== 'question') {
+      hidden.add(block.id);
+      autoHidden.add(block.id);
+      continue;
+    }
+    const patch = diffValue(block, compactWorkbookQuestion(block));
+    if (patch && typeof patch === 'object' && !Array.isArray(patch) && Object.keys(patch).length) {
+      blockPatches[block.id] = patch;
+    }
+  }
+
+  return {
+    ...cloneValue(existingVersion),
+    overrides: normaliseVersionOverrides({
+      ...overrides,
+      blockPatches,
+      hiddenBlockIds: [...hidden],
+      // Retain historical IDs as well as the current snapshot. If a master
+      // block is temporarily removed and restored with its stable ID, it is
+      // still an inherited original rather than a fresh workbook addition.
+      workbookMasterBlockIds: uniqueStrings([
+        ...(overrides.workbookMasterBlockIds ?? []),
+        ...masterBlocks.map((block) => block.id),
+      ]),
+      workbookMasterBlockKinds: Object.fromEntries([
+        ...Object.entries(recordedKinds ?? {}),
+        ...masterBlocks.map((block) => [block.id, workbookBlockKind(block.kind)]),
+      ]),
+      workbookAutoHiddenBlockIds: [...autoHidden],
+    }),
+  };
 }
 
 export function compareVersions(master, firstId, secondId) {

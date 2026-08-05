@@ -47,6 +47,22 @@ test('fraction locations are read as exact number-line tasks rather than generic
   }
 });
 
+test('mixed-number endpoints and targets retain one exact supplied scale', () => {
+  const source = 'Place 1 3/4 on a number line from 1 1/2 to 2 1/2 divided into quarters.';
+  assert.deepEqual(parseNumberLinePrompt(source), {
+    start: 1.5,
+    end: 2.5,
+    divisions: 4,
+    step: 0.25,
+    target: 1.75,
+  });
+
+  const matched = matchQuestionToModels(source);
+  assert.equal(matched.provisionalRecipe?.family, 'number-line');
+  assert.deepEqual(matched.provisionalRecipe.values.ticks, [1.5, 1.75, 2, 2.25, 2.5]);
+  assert.deepEqual(matched.provisionalRecipe.values.markers, [{ value: 1.75, label: '1 3/4' }]);
+});
+
 test('digit-value and error-analysis wording retain their actual task families', () => {
   assert.equal(analyseQuestion('What is the value of the digit 4 in 3,482?').questionFamily, 'identify-place-value');
   const source = 'A pupil places 2 1/3 before 2 on a number line. Explain the error.';
@@ -140,6 +156,27 @@ test('numeric rounding magnitudes with thousands separators retain exact boundar
   assert.equal(rankModelRecommendations(interpretation).recommendations[0].family, 'rounding-number-line');
 });
 
+test('rounding identifies target and magnitude by role rather than source order', () => {
+  const leadingMagnitude = analyseQuestion('To the nearest 100, round 3,462.');
+  assert.deepEqual(leadingMagnitude.mathematicalStructure.rounding, {
+    lower: 3400,
+    upper: 3500,
+    midpoint: 3450,
+    magnitude: 100,
+    target: 3462,
+  });
+  assert.equal(matchQuestionToModels('To the nearest 100, round 3,462.').provisionalRecipe?.family, 'rounding-number-line');
+
+  const batchSource = 'Round each number to the nearest 10: 36, 74 and 128.';
+  const batch = analyseQuestion(batchSource);
+  const batchMatch = matchQuestionToModels(batchSource);
+  assert.deepEqual(batch.mathematicalStructure.roundingTargets, [36, 74, 128]);
+  assert.equal(batch.mathematicalStructure.rounding, null);
+  assert.equal(batch.needsReview, true);
+  assert.equal(batchMatch.provisionalRecipe, null);
+  assert.equal(batchMatch.noModelRecommended, true);
+});
+
 test('times tables and transformation wording do not become statistics or money', () => {
   const timesTable = analyseQuestion('Write the next three numbers in the 4 times table.');
   const fractionChange = analyseQuestion('Change 3/4 into a decimal.');
@@ -151,6 +188,44 @@ test('times tables and transformation wording do not become statistics or money'
   assert.notEqual(rankModelRecommendations(fractionChange).recommendations[0]?.family, 'money');
   assert.notEqual(measureChange.curriculumDomain, 'Money');
   assert.notEqual(rankModelRecommendations(measureChange).recommendations[0]?.family, 'money');
+});
+
+test('explicit pupil-created clocks, charts and comparison signs are resolved confidently', () => {
+  const prompts = [
+    ['Draw the hands to show 3:45.', 'draw-hands', 'clock-model'],
+    ['Draw the hands to show quarter to four.', 'draw-hands', 'clock-model'],
+    ['Draw a bar chart to show 4 red, 6 blue and 3 green votes.', 'construct-chart', 'bar-chart'],
+    ['Put <, > or = between each pair: 3,405 ___ 3,450.', 'compare', 'ordering-comparison-line'],
+  ];
+
+  for (const [source, family, model] of prompts) {
+    const interpretation = analyseQuestion(source);
+    const matched = matchQuestionToModels(source);
+    assert.equal(interpretation.questionFamily, family, source);
+    assert.equal(interpretation.confidence, 'high', source);
+    assert.equal(interpretation.status, 'resolved', source);
+    assert.equal(matched.provisionalRecipe?.family, model, source);
+  }
+  const wordTime = matchQuestionToModels(prompts[1][0]).provisionalRecipe;
+  assert.deepEqual(wordTime.values, { hour: 3, minute: 45, showHands: true, showDigital: false });
+  assert.equal(wordTime.unknown, 'hands');
+  assert.ok(wordTime.hidden.includes('hands'));
+  const unspecifiedTime = matchQuestionToModels('Draw the hands to show the time.');
+  assert.equal(unspecifiedTime.interpretation.needsReview, true);
+  assert.equal(unspecifiedTime.provisionalRecipe, null);
+  assert.equal(unspecifiedTime.noModelRecommended, true);
+  const chart = matchQuestionToModels(prompts[2][0]).provisionalRecipe;
+  assert.deepEqual(chart.values.rows, [
+    { label: 'Red', value: 4 },
+    { label: 'Blue', value: 6 },
+    { label: 'Green', value: 3 },
+  ]);
+  assert.equal(chart.values.max, 10);
+  assert.ok(chart.hidden.includes('all'));
+  const missingChartData = matchQuestionToModels('Draw a bar chart to show the data.');
+  assert.equal(missingChartData.provisionalRecipe, null);
+  assert.equal(missingChartData.noModelRecommended, true);
+  assert.deepEqual(matchQuestionToModels(prompts[3][0]).provisionalRecipe.values.numbers, [3405, 3450]);
 });
 
 test('spaced slash division and am/pm durations retain their intended mathematics', () => {
@@ -240,6 +315,18 @@ test('error-analysis preserves the misconception rather than silently correcting
   assert.equal(interpretation.answerProtection.preserveSourceError, true);
   assert.ok(interpretation.answerProtection.prohibitedAutoFill.includes('correction'));
   assert.equal(interpretation.representationPurpose, 'support-reasoning-or-proof');
+});
+
+test('correctness claims are preserved for review instead of becoming model dimensions', () => {
+  const source = 'Ava says the perimeter is 24 cm. Is she correct? Explain.';
+  const interpretation = analyseQuestion(source);
+  const matched = matchQuestionToModels(source);
+
+  assert.equal(interpretation.questionFamily, 'find-error');
+  assert.equal(interpretation.answerProtection.preserveSourceError, true);
+  assert.equal(interpretation.needsReview, true);
+  assert.equal(matched.provisionalRecipe, null);
+  assert.equal(matched.noModelRecommended, true);
 });
 
 test('chart construction and clock drawing protect pupil-created visual information', () => {

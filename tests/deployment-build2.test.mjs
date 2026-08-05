@@ -65,24 +65,24 @@ async function moduleDependencyPaths(entryPath) {
   return visited;
 }
 
-test('release v3 uses a product-scoped cache namespace', async () => {
+test('release v4 uses a product-scoped cache namespace', async () => {
   const worker = await readProjectFile('service-worker.js');
   assert.match(worker, /const CACHE_PREFIX = 'maths-page-studio-';/);
-  assert.match(worker, /const CACHE = `\$\{CACHE_PREFIX\}release-v3`;/);
+  assert.match(worker, /const CACHE = `\$\{CACHE_PREFIX\}release-v4`;/);
   assert.match(worker, /await self\.skipWaiting\(\)/);
   assert.match(worker, /await self\.clients\.claim\(\)/);
   assert.match(worker, /key\.startsWith\(CACHE_PREFIX\) && key !== CACHE/);
   assert.doesNotMatch(worker, /filter\(\(key\) => key !== CACHE\)/, 'Activation must not delete unrelated origin caches.');
 });
 
-test('release v3 addresses the complete changed asset and module graph', async () => {
+test('release v4 addresses the complete changed asset and module graph', async () => {
   const [html, app, state, worker] = await Promise.all([
     readProjectFile('index.html'),
     readProjectFile('js/app.js'),
     readProjectFile('js/state.js'),
     readProjectFile('service-worker.js'),
   ]);
-  const release = 'release-v3';
+  const release = 'release-v4';
   assert.match(html, new RegExp(`\\./css/styles\\.css\\?v=${release}`));
   assert.match(worker, new RegExp(`\\./css/styles\\.css\\?v=${release}`));
   assert.match(html, new RegExp(`\\./js/app\\.js\\?v=${release}`));

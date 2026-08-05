@@ -207,6 +207,68 @@ test('mixed edits keep a question-model-response block intact and undo/redo in e
   assert.equal(store.getState().originalImport.rawText, rawText);
 });
 
+test('replaceBaseline installs a migrated worksheet without retaining stale undo or redo snapshots', () => {
+  const initial = worksheetWith([question('old_question', 'Old question')]);
+  const store = createStore(initial, { autosave: false, storage: null, now: () => later(1) });
+  const events = [];
+  store.subscribe((_state, details) => events.push(details));
+
+  store.dispatch(worksheetActions.updateBlock('old_question', { displayText: 'Edited old question' }));
+  assert.equal(store.canUndo(), true);
+  assert.equal(store.undo(), true);
+  assert.equal(store.canRedo(), true, 'the stale edit exists before the baseline is replaced');
+
+  const migrated = {
+    version: 0,
+    id: 'migrated_baseline',
+    rawText: 'Fresh A\nFresh B',
+    questionBlocks: [
+      { id: 'fresh_a', text: 'Fresh A' },
+      { id: 'fresh_b', text: 'Fresh B' },
+    ],
+  };
+  assert.equal(store.replaceBaseline(migrated), true);
+  assert.equal(store.getState().version, WORKSHEET_VERSION);
+  assert.deepEqual(store.getState().blocks.map((block) => block.id), ['fresh_a', 'fresh_b']);
+  assert.equal(store.canUndo(), false);
+  assert.equal(store.canRedo(), false);
+  assert.equal(store.undo(), false, 'Undo cannot resurrect the pre-migration worksheet');
+  assert.equal(store.redo(), false, 'Redo cannot resurrect a discarded edit');
+  assert.deepEqual(events.at(-1), {
+    reason: 'replace-baseline',
+    action: null,
+    canUndo: false,
+    canRedo: false,
+    persistenceStatus: 'unavailable',
+    persistenceOnly: false,
+  });
+
+  store.dispatch(worksheetActions.updateBlock('fresh_a', { displayText: 'Fresh edit' }));
+  assert.equal(store.undo(), true);
+  assert.equal(store.getState().blocks[0].displayText, 'Fresh A');
+  assert.deepEqual(store.getState().blocks.map((block) => block.id), ['fresh_a', 'fresh_b']);
+});
+
+test('replaceBaseline validates before clearing the current worksheet or its history', () => {
+  const store = createStore(
+    worksheetWith([question('safe_question', 'Safe question')]),
+    { autosave: false, storage: null, now: () => later(1) },
+  );
+  store.dispatch(worksheetActions.updateBlock('safe_question', { displayText: 'Current edit' }));
+  const before = store.getState();
+
+  assert.equal(store.replaceBaseline({
+    schema: WORKSHEET_SCHEMA,
+    version: WORKSHEET_VERSION,
+    metadata: { id: 'invalid_replacement' },
+    blocks: 'not-an-array',
+  }), false);
+  assert.equal(store.getState(), before);
+  assert.equal(store.canUndo(), true, 'a rejected replacement leaves existing edit history intact');
+  assert.equal(store.undo(), true);
+  assert.equal(store.getState().blocks[0].displayText, 'Safe question');
+});
+
 test('replace structure updates blocks and architecture atomically and prunes stale page breaks', () => {
   const first = question('first', 'First question');
   const removed = question('removed', 'Question that will be removed');
@@ -574,6 +636,9 @@ test('duplicating a linked version remaps every block and manual-break reference
         blockPatches: { source_b: { section: 'source_section' } },
         addedBlocks: [question('variant_added', 'Variant-only question', { section: 'source_section' })],
         order: ['source_section', 'source_b', 'source_a', 'variant_added'],
+        workbookMasterBlockIds: ['source_section', 'source_a', 'source_b'],
+        workbookMasterBlockKinds: { source_section: 'heading', source_a: 'question', source_b: 'question' },
+        workbookAutoHiddenBlockIds: ['source_section'],
       },
     }),
     timestamp: later(1),
@@ -597,6 +662,13 @@ test('duplicating a linked version remaps every block and manual-break reference
   const copiedAdded = resolved.blocks.find((block) => block.displayText === 'Variant-only question');
   assert.equal(copiedQuestionB.section, copiedHeading.id);
   assert.equal(copiedAdded.section, copiedHeading.id);
+  const copiedVersion = duplicate.versions.items.find((version) => version.id === duplicate.versions.activeId);
+  assert.ok(copiedVersion.overrides.workbookMasterBlockIds.every((id) => liveIds.has(id)));
+  assert.ok(!copiedVersion.overrides.workbookMasterBlockIds.includes('source_a'));
+  assert.ok(Object.keys(copiedVersion.overrides.workbookMasterBlockKinds).every((id) => liveIds.has(id)));
+  assert.ok(!Object.hasOwn(copiedVersion.overrides.workbookMasterBlockKinds, 'source_section'));
+  assert.ok(copiedVersion.overrides.workbookAutoHiddenBlockIds.every((id) => liveIds.has(id)));
+  assert.ok(!copiedVersion.overrides.workbookAutoHiddenBlockIds.includes('source_section'));
 });
 
 test('store autosaves each committed edit and reopens the edited worksheet', () => {

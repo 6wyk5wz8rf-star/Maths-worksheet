@@ -43,6 +43,29 @@ export const PAGINATION_DEFAULTS = Object.freeze({
 const SIZE_SCALE = Object.freeze({ compact: 0.82, standard: 1, large: 1.45, 'extra-large': 1.72 });
 const DENSITY_SCALE = Object.freeze({ compact: 0.82, standard: 1, spacious: 1.2 });
 
+// Labelled horizontal representations need substantially more physical width
+// than a generic diagram. At the former half-column width their SVG labels
+// could fall to roughly four-point type while still passing the old 62 mm
+// family default.
+const WIDE_MODEL_FAMILIES = new Set([
+  'number-line', 'marked-number-line', 'empty-number-line',
+  'part-whole-bar', 'part-whole-bar-model', 'comparison-bar', 'comparison-bar-model',
+  'fraction-strip', 'fraction-bar',
+  'four-digit-number-line', 'ordering-comparison-line', 'rounding-number-line',
+  'negative-number-line', 'empty-calculation-line', 'repeated-addition-line',
+  'division-number-line', 'fraction-number-line', 'decimal-number-line',
+  'duration-timeline', 'ruler-length-line', 'fraction-wall',
+  'equivalent-fraction-strips', 'fraction-of-quantity-bar', 'fraction-calculation-bar',
+  'bar-chart', 'line-graph', 'tally-frequency-table', 'editable-table',
+]);
+
+const WIDE_MODEL_MIN_WIDTH_MM = Object.freeze({
+  compact: 120,
+  standard: 160,
+  large: 172,
+  'extra-large': 180,
+});
+
 // Heights are deliberately conservative: they include labels and safe SVG air.
 export const MODEL_PRINT_METRICS = Object.freeze({
   'place-value-chart': { height: 27, minWidth: 76, minHeight: 18 },
@@ -115,6 +138,21 @@ function normaliseFamily(family) {
 
 function modelMetrics(family) {
   return MODEL_PRINT_METRICS[normaliseFamily(family)] ?? MODEL_PRINT_METRICS.default;
+}
+
+function isWideModel(model) {
+  return Boolean(model && WIDE_MODEL_FAMILIES.has(normaliseFamily(model.family)));
+}
+
+function modelRequiresFullWidth(model, worksheet = null) {
+  if (!model) return false;
+  if (model.metadata?.requiresFullWidth === true) return true;
+  if (model.size === 'large' || model.size === 'extra-large') return true;
+  // A labelled horizontal model is not a safe half-column object.  This is a
+  // print-legibility rule, not a workbook-only preference: at the old 84 mm
+  // slot, number-line labels could fall below five-point type.
+  if (isWideModel(model)) return true;
+  return Boolean(worksheet?.settings?.workbookMode && model.metadata?.workbookFullWidth);
 }
 
 export function mmToPx(mm) {
@@ -276,7 +314,11 @@ export function estimateModelBox(model, availableWidthMm) {
   const scale = SIZE_SCALE[model.size] ?? 1;
   const specifiedHeight = finiteNumber(model.printHeightMm, null);
   const heightMm = specifiedHeight == null ? metrics.height * scale : clamp(specifiedHeight, 8, 120);
-  const minWidthMm = finiteNumber(model.printMinWidthMm, metrics.minWidth);
+  const declaredMinWidthMm = finiteNumber(model.printMinWidthMm, metrics.minWidth);
+  const physicalWideMinimumMm = isWideModel(model)
+    ? WIDE_MODEL_MIN_WIDTH_MM[model.size] ?? WIDE_MODEL_MIN_WIDTH_MM.standard
+    : 0;
+  const minWidthMm = Math.max(declaredMinWidthMm, physicalWideMinimumMm);
   const warnings = [];
   if (availableWidthMm + 0.01 < minWidthMm || heightMm + 0.01 < metrics.minHeight) {
     warnings.push({
@@ -483,17 +525,17 @@ function sectionUsesRows(worksheet, block) {
   return worksheet.architecture?.compositionMode === 'rows';
 }
 
-function needsFullWidth(block) {
+function needsFullWidth(block, worksheet = null, outputView = 'pupil') {
   const footprint = compositionFootprint(block);
   return block.kind !== 'question'
     || footprint === 'full'
     || footprint === 'page'
     || block.layout?.columnSpan === 'full'
-    || block.model?.metadata?.requiresFullWidth === true;
+    || modelRequiresFullWidth(selectedModelForView(block, outputView), worksheet);
 }
 
-function mayUseHalfWidth(block, worksheet = null) {
-  if (block?.kind !== 'question' || needsFullWidth(block)) return false;
+function mayUseHalfWidth(block, worksheet = null, outputView = 'pupil') {
+  if (block?.kind !== 'question' || needsFullWidth(block, worksheet, outputView)) return false;
   if (worksheet && !sectionUsesRows(worksheet, block)) return false;
   return compositionFootprint(block) === 'half' || block.layout?.columnSpan === 'half';
 }
@@ -531,7 +573,7 @@ function addPlacementWarning(page, warnings, blockId, placement, measurement) {
   }
 }
 
-function buildPaginationResult(geometry, outputView, pages, placements, warnings) {
+function buildPaginationResult(geometry, outputView, pages, placements, warnings, worksheet = null) {
   for (const currentPage of pages) {
     const used = currentPage.columns.reduce((sum, column) => sum + column.usedHeightMm, 0);
     const capacity = currentPage.bodyHeightMm * geometry.columns;
@@ -575,7 +617,23 @@ function buildPaginationResult(geometry, outputView, pages, placements, warnings
     currentPage.warnings = dedupeWarnings(currentPage.warnings);
   }
 
+  const workbookMode = Boolean(worksheet?.settings?.workbookMode);
+  if (workbookMode && pages.length !== 1) {
+    warnings.push(blockWarning(
+      'workbook-page-count',
+      `This workbook sheet needs ${pages.length} readable A4 pages; it has not been shrunk to force one page.`,
+      { pageCount: pages.length },
+    ));
+  }
+
   const finalWarnings = dedupeWarnings(warnings);
+  const hasOverflow = finalWarnings.some((warning) => warning.code === 'block-overcrowded');
+  const tooSmallModelBlockIds = finalWarnings
+    .filter((warning) => warning.code === 'model-too-small')
+    .map((warning) => warning.blockId);
+  const blocksWithoutResponseSpace = finalWarnings
+    .filter((warning) => warning.code === 'no-meaningful-response-space')
+    .map((warning) => warning.blockId);
   return {
     geometry,
     outputView,
@@ -583,14 +641,14 @@ function buildPaginationResult(geometry, outputView, pages, placements, warnings
     placements,
     pageCount: pages.length,
     warnings: finalWarnings,
-    hasOverflow: finalWarnings.some((warning) => warning.code === 'block-overcrowded'),
+    hasOverflow,
     hasAnswerRevealRisk: finalWarnings.some((warning) => warning.code === 'assessment-answer-reveal'),
-    tooSmallModelBlockIds: finalWarnings
-      .filter((warning) => warning.code === 'model-too-small')
-      .map((warning) => warning.blockId),
-    blocksWithoutResponseSpace: finalWarnings
-      .filter((warning) => warning.code === 'no-meaningful-response-space')
-      .map((warning) => warning.blockId),
+    tooSmallModelBlockIds,
+    blocksWithoutResponseSpace,
+    workbookMode,
+    workbookFitsOnePage: workbookMode
+      ? pages.length === 1 && !hasOverflow && !tooSmallModelBlockIds.length && !blocksWithoutResponseSpace.length
+      : null,
     crowdedPageNumbers: finalWarnings.filter((warning) => ['page-near-capacity', 'block-overcrowded'].includes(warning.code)).map((warning) => warning.page).filter(Boolean),
     sparsePageNumbers: finalWarnings.filter((warning) => ['page-empty', 'page-nearly-empty'].includes(warning.code)).map((warning) => warning.page).filter(Boolean),
     orphanedHeadingBlockIds: finalWarnings.filter((warning) => warning.code === 'orphaned-heading').map((warning) => warning.blockId).filter(Boolean),
@@ -664,9 +722,9 @@ function paginateRowsWorksheet(worksheet, options = {}) {
     if (pageFootprint && hasItems()) newPage();
 
     const nextBlock = worksheet.blocks[index + 1];
-    const paired = mayUseHalfWidth(block, worksheet)
+    const paired = mayUseHalfWidth(block, worksheet, outputView)
       && nextBlock
-      && mayUseHalfWidth(nextBlock, worksheet)
+      && mayUseHalfWidth(nextBlock, worksheet, outputView)
       && !manualBreaks.has(nextBlock.id)
       && (nextBlock.section === block.section || !nextBlock.section || !block.section);
 
@@ -682,11 +740,11 @@ function paginateRowsWorksheet(worksheet, options = {}) {
       continue;
     }
 
-    const full = needsFullWidth(block) || !mayUseHalfWidth(block, worksheet);
+    const full = needsFullWidth(block, worksheet, outputView) || !mayUseHalfWidth(block, worksheet, outputView);
     const widthMm = full ? geometry.contentWidthMm : geometry.columnWidthMm;
     let measurement = measureQuestionBlock(block, widthMm, { density, outputView });
     if (!pageFootprint && block.layout?.keepWithNext && nextBlock) {
-      const nextWidth = mayUseHalfWidth(nextBlock, worksheet) ? geometry.columnWidthMm : geometry.contentWidthMm;
+      const nextWidth = mayUseHalfWidth(nextBlock, worksheet, outputView) ? geometry.columnWidthMm : geometry.contentWidthMm;
       const nextMeasurement = measureQuestionBlock(nextBlock, nextWidth, { density, outputView });
       if (measurement.heightMm + blockGapMm + nextMeasurement.heightMm > remainingHeight() && hasItems()) newPage();
     }
@@ -697,7 +755,7 @@ function paginateRowsWorksheet(worksheet, options = {}) {
     cursorY += measurement.heightMm + blockGapMm;
   }
 
-  return buildPaginationResult(geometry, outputView, pages, placements, warnings);
+  return buildPaginationResult(geometry, outputView, pages, placements, warnings, worksheet);
 }
 
 /**
@@ -768,12 +826,7 @@ export function paginateWorksheet(worksheet, options = {}) {
     const block = worksheet.blocks[index];
     const footprint = compositionFootprint(block);
     const pageFootprint = footprint === 'page';
-    const wantsFullWidth = geometry.columns === 2 && (
-      footprint === 'full'
-      || pageFootprint
-      || block.layout?.columnSpan === 'full'
-      || block.model?.metadata?.requiresFullWidth === true
-    );
+    const wantsFullWidth = geometry.columns === 2 && needsFullWidth(block, worksheet, outputView);
     const pageHint = Math.max(0, Math.floor(finiteNumber(block.layout?.pageHint, 0)));
 
     if (manualBreaks.has(block.id) && pageHasItems()) newPage();
@@ -869,7 +922,7 @@ export function paginateWorksheet(worksheet, options = {}) {
     }
   }
 
-  return buildPaginationResult(geometry, outputView, pages, placements, warnings);
+  return buildPaginationResult(geometry, outputView, pages, placements, warnings, worksheet);
 }
 
 /** CSS variables shared by an on-screen page and its @media print rule. */

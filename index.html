@@ -8,7 +8,7 @@
     <title>Maths Page Studio</title>
     <link rel="manifest" href="./manifest.webmanifest">
     <link rel="icon" href="./assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="./css/styles.css?v=release-v3">
+    <link rel="stylesheet" href="./css/styles.css?v=release-v4">
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to worksheet</a>
@@ -24,24 +24,30 @@
         </span>
       </div>
 
-      <nav class="stage-nav" aria-label="Worksheet stages">
-        <button type="button" class="stage-step" data-stage-target="paste"><span>1</span>Paste</button>
-        <button type="button" class="stage-step" data-stage-target="check"><span>2</span>Check</button>
-        <button type="button" class="stage-step" data-stage-target="make"><span>3</span>Compose</button>
-        <button type="button" class="stage-step" data-stage-target="print"><span>4</span>Print</button>
-      </nav>
+      <div class="header-context" id="header-context" aria-live="polite">Paste questions</div>
 
       <div class="header-actions">
-        <button type="button" class="icon-button" id="project-library-button" aria-label="Open saved worksheets" title="Saved worksheets">
-          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v15H6.5A2.5 2.5 0 0 1 4 16.5v-10Z"/><path d="M4 16.5A2.5 2.5 0 0 1 6.5 14H20M8 8h8"/></svg>
-          <span class="button-label">My sheets</span>
-        </button>
-        <button type="button" class="icon-button" id="undo-button" aria-label="Undo" title="Undo" disabled>
-          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 8-5 4 5 4"/><path d="M5 12h8a6 6 0 0 1 6 6"/></svg>
-        </button>
-        <button type="button" class="icon-button" id="redo-button" aria-label="Redo" title="Redo" disabled>
-          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 8 5 4-5 4"/><path d="M19 12h-8a6 6 0 0 0-6 6"/></svg>
-        </button>
+        <details class="header-menu">
+          <summary class="icon-button" aria-label="Open worksheet menu" title="Worksheet menu">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>
+          </summary>
+          <div class="header-menu-panel">
+            <button type="button" id="project-library-button">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v15H6.5A2.5 2.5 0 0 1 4 16.5v-10Z"/><path d="M4 16.5A2.5 2.5 0 0 1 6.5 14H20M8 8h8"/></svg>
+              My worksheets
+            </button>
+            <button type="button" id="undo-button" disabled>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 8-5 4 5 4"/><path d="M5 12h8a6 6 0 0 1 6 6"/></svg>
+              Undo
+            </button>
+            <button type="button" id="redo-button" disabled>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 8 5 4-5 4"/><path d="M19 12h-8a6 6 0 0 0-6 6"/></svg>
+              Redo
+            </button>
+            <button type="button" data-action="open-settings">Page setup</button>
+            <button type="button" data-action="open-versions">Adaptations</button>
+          </div>
+        </details>
         <button type="button" class="primary compact" id="header-print-button" aria-label="Print worksheet">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 9V3h10v6M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M7 14h10v7H7z"/></svg>
           <span>Print</span>
@@ -98,10 +104,10 @@
       <form method="dialog">
         <div class="modal-heading">
           <div>
-            <span class="eyebrow">One worksheet, purposeful versions</span>
-            <h2 id="versions-dialog-title">Versions</h2>
+            <span class="eyebrow">Only when pupils need a different route</span>
+            <h2 id="versions-dialog-title">Adaptations</h2>
           </div>
-          <button value="cancel" class="close-button" aria-label="Close worksheet versions">×</button>
+          <button value="cancel" class="close-button" aria-label="Close adaptations">×</button>
         </div>
         <div id="versions-content"></div>
       </form>
@@ -109,6 +115,6 @@
 
     <!-- Release-address the entry module so an installed browser does not keep
          an older app graph while the service worker is updating. -->
-    <script type="module" src="./js/app.js?v=release-v3"></script>
+    <script type="module" src="./js/app.js?v=release-v4"></script>
   </body>
 </html>

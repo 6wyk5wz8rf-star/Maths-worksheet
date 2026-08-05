@@ -13,7 +13,12 @@ import {
 } from '../js/state.js';
 import { paginateWorksheet } from '../js/pagination.js';
 import { suggestWorksheetArchitecture } from '../js/worksheet-architecture.js';
-import { compareVersions, createWorkbookCutoutVariant, resolveWorksheetVersion } from '../js/worksheet-versions.js';
+import {
+  compareVersions,
+  createWorkbookCutoutVariant,
+  reconcileWorkbookCutoutVariant,
+  resolveWorksheetVersion,
+} from '../js/worksheet-versions.js';
 
 const NOW = '2026-08-04T12:00:00.000Z';
 const later = (minute) => `2026-08-04T12:${String(minute).padStart(2, '0')}:00.000Z`;
@@ -330,21 +335,41 @@ test('block footprints change printable height and a safe full-page block owns e
   assert.equal(result.hasOverflow, false);
 });
 
-test('workbook cut-outs creates one linked A4 sheet for compact response-model questions without duplicate answer spaces', () => {
-  const locations = Array.from({ length: 10 }, (_, index) => {
+test('workbook cut-outs clears inherited sections and breaks while keeping five wide response models readable on one page', () => {
+  const heading = createQuestionBlock({
+    id: 'workbook-heading',
+    kind: 'heading',
+    originalText: 'Reasoning',
+    displayText: 'Reasoning',
+    section: 'workbook-section',
+  });
+  const locations = Array.from({ length: 5 }, (_, index) => {
     const start = index % 5;
     const end = start + 1;
     return question(`location-${index}`, `Place ${start} 1/2 on a number line from ${start} to ${end}.`, {
+      section: 'workbook-section',
       model: createModelRecipe('number-line', {
         values: { start, end, divisions: 2, markers: [{ value: start + 0.5, label: `${start + 0.5}` }] },
         unknown: 'marker:0',
         purpose: 'response-model',
         completionState: 'partly-completed',
+        size: index === 0 ? 'large' : index === 1 ? 'compact' : 'standard',
       }),
       response: { type: 'answer-box', size: 'standard' },
+      composition: { footprint: 'half', startOnNewPage: index === 2 },
+      layout: { columnSpan: 'half', manualBreakBefore: index === 3, pageHint: index > 2 ? 3 : 0 },
     });
   });
-  const master = worksheet(locations);
+  const master = worksheet([heading, ...locations], {
+    architecture: {
+      compositionMode: 'flow',
+      sections: [{
+        id: 'workbook-section', headingId: heading.id, name: 'Reasoning', role: 'reasoning',
+        layout: 'flow', startOnNewPage: true,
+      }],
+    },
+    pageArrangement: { manualBreakBefore: ['location-4'], pageOverrides: { 2: { note: 'old page' } } },
+  });
   const workbook = createWorkbookCutoutVariant(master, { id: 'workbook' });
   const resolved = resolveWorksheetVersion({
     ...master,
@@ -354,12 +379,544 @@ test('workbook cut-outs creates one linked A4 sheet for compact response-model q
 
   assert.equal(resolved.settings.columns, 2);
   assert.equal(resolved.settings.density, 'compact');
+  assert.equal(resolved.settings.workbookMode, true);
   assert.equal(resolved.architecture.header.layout, 'compact');
-  assert.ok(resolved.blocks.every((block) => block.model?.size === 'standard'));
+  assert.deepEqual(resolved.architecture.sections, []);
+  assert.ok(resolved.blocks.every((block) => block.kind === 'question'));
+  assert.ok(resolved.blocks.every((block) => block.section === null));
+  assert.deepEqual(resolved.pageArrangement.manualBreakBefore, []);
+  assert.deepEqual(resolved.pageArrangement.pageOverrides, {});
+  assert.equal(resolved.blocks[0].model.size, 'large', 'a deliberate Large choice must survive workbook packing');
+  assert.equal(resolved.blocks[1].model.size, 'standard', 'only Compact is promoted to the readable normal size');
   assert.ok(resolved.blocks.every((block) => block.response.type === 'none'));
+  assert.ok(resolved.blocks.every((block) => !block.composition.startOnNewPage && !block.layout.manualBreakBefore && block.layout.pageHint === 0));
+  assert.ok(resolved.blocks.every((block) => result.placements[block.id].widthMm === result.geometry.contentWidthMm));
   assert.equal(result.pageCount, 1);
   assert.equal(result.hasOverflow, false);
+  assert.equal(result.workbookMode, true);
+  assert.equal(result.workbookFitsOnePage, true);
   assert.deepEqual(result.blocksWithoutResponseSpace, []);
+});
+
+test('workbook response removal follows the model purpose and never a generic completion verb', () => {
+  const calculation = question('complete-calculation', 'Complete the calculation 3,482 + 2,135.', {
+    model: createModelRecipe('column-arithmetic', {
+      values: { operation: 'addition', operands: [3482, 2135], result: null },
+      purpose: 'thinking-model',
+      completionState: 'partly-completed',
+    }),
+    response: { type: 'calculation-area', size: 'standard' },
+  });
+  const location = question('place-value', 'Place 2 1/2 on the number line.', {
+    model: createModelRecipe('number-line', {
+      values: { start: 2, end: 3, divisions: 2, markers: [{ value: 2.5, label: '2 1/2' }] },
+      unknown: 'marker:0',
+      purpose: 'response-model',
+      completionState: 'partly-completed',
+    }),
+    response: { type: 'answer-box', size: 'standard' },
+  });
+  const master = worksheet([calculation, location]);
+  const version = createWorkbookCutoutVariant(master, { id: 'workbook-purpose' });
+  const resolved = resolveWorksheetVersion({
+    ...master,
+    versions: { activeId: version.id, items: [version] },
+  }, version.id);
+
+  assert.equal(resolved.blocks.find((block) => block.id === calculation.id).response.type, 'calculation-area');
+  assert.equal(resolved.blocks.find((block) => block.id === location.id).response.type, 'none');
+  assert.deepEqual(paginateWorksheet(resolved).blocksWithoutResponseSpace, []);
+});
+
+test('workbook pagination reports an honest failed one-page invariant without shrinking wide models', () => {
+  const locations = Array.from({ length: 10 }, (_, index) => question(
+    `many-location-${index}`,
+    `Place ${index + 0.5} on the number line from ${index} to ${index + 1}.`,
+    {
+      model: createModelRecipe('number-line', {
+        values: { start: index, end: index + 1, divisions: 2, markers: [{ value: index + 0.5, label: `${index + 0.5}` }] },
+        unknown: 'marker:0',
+        purpose: 'response-model',
+        completionState: 'partly-completed',
+        size: 'standard',
+      }),
+      response: { type: 'none', size: 'compact' },
+    },
+  ));
+  const master = worksheet(locations);
+  const version = createWorkbookCutoutVariant(master, { id: 'workbook-many' });
+  const resolved = resolveWorksheetVersion({ ...master, versions: { activeId: version.id, items: [version] } }, version.id);
+  const result = paginateWorksheet(resolved);
+
+  assert.ok(result.pageCount > 1);
+  assert.equal(result.workbookFitsOnePage, false);
+  assert.ok(result.warnings.some((warning) => warning.code === 'workbook-page-count' && warning.pageCount === result.pageCount));
+  assert.deepEqual(result.tooSmallModelBlockIds, []);
+  assert.ok(resolved.blocks.every((block) => block.model.size === 'standard'));
+});
+
+test('workbook reconciliation changes only later master additions and preserves every existing workbook edit', () => {
+  const originalHeading = createQuestionBlock({
+    id: 'original-heading',
+    kind: 'heading',
+    originalText: 'Original section',
+    displayText: 'Original section',
+    section: 'original-section',
+  });
+  const resetQuestion = question('reset-question', 'What is 6 × 7?', {
+    section: 'original-section',
+    composition: { footprint: 'spacious', startOnNewPage: true },
+    layout: { columnSpan: 'full', manualBreakBefore: true, pageHint: 2 },
+  });
+  const editedQuestion = question('edited-question', 'Place 1/2 on a number line.', {
+    section: 'original-section',
+    model: createModelRecipe('number-line', {
+      purpose: 'response-model',
+      completionState: 'partly-completed',
+      size: 'standard',
+    }),
+  });
+  const removedQuestion = question('removed-question', 'What is 8 × 8?');
+  const originalMaster = worksheet([originalHeading, resetQuestion, editedQuestion, removedQuestion]);
+  const existing = createWorkbookCutoutVariant(originalMaster, { id: 'reconciled-workbook' });
+
+  // These are all deliberate edits made only inside the existing workbook.
+  // Resetting the first question removes its generated patch entirely, which
+  // is why reconciliation needs the creation-time master ID baseline.
+  delete existing.overrides.blockPatches[resetQuestion.id];
+  existing.overrides.blockPatches[editedQuestion.id] = {
+    ...existing.overrides.blockPatches[editedQuestion.id],
+    displayText: 'Teacher-edited workbook wording',
+    model: { size: 'extra-large', position: 'beneath' },
+  };
+  existing.overrides.hiddenBlockIds.push(removedQuestion.id);
+  const workbookOnly = question('workbook-only', 'A workbook-only prompt.', {
+    response: { type: 'lined-explanation', size: 'compact' },
+  });
+  existing.overrides.addedBlocks.push(workbookOnly);
+  existing.overrides.order = [editedQuestion.id, resetQuestion.id, workbookOnly.id];
+  assert.strictEqual(
+    reconcileWorkbookCutoutVariant(originalMaster, existing),
+    existing,
+    'an already-current workbook returns the same object and cannot create a fake edit',
+  );
+
+  const newHeading = createQuestionBlock({
+    id: 'later-heading',
+    kind: 'heading',
+    originalText: 'Later section',
+    displayText: 'Later section',
+    section: 'later-section',
+  });
+  const newInstruction = createQuestionBlock({
+    id: 'later-instruction',
+    kind: 'instruction',
+    originalText: 'Show your method.',
+    displayText: 'Show your method.',
+    section: 'later-section',
+  });
+  const newCompactQuestion = question('later-compact-question', 'Place 2 1/2 on the number line.', {
+    section: 'later-section',
+    model: createModelRecipe('number-line', {
+      purpose: 'response-model',
+      completionState: 'partly-completed',
+      size: 'compact',
+    }),
+    response: { type: 'answer-box', size: 'standard' },
+    composition: { footprint: 'spacious', startOnNewPage: true },
+    layout: { columnSpan: 'full', keepWithNext: true, manualBreakBefore: true, pageHint: 5 },
+  });
+  const newLargeQuestion = question('later-large-question', 'Use the bar model.', {
+    section: 'later-section',
+    model: createModelRecipe('comparison-bar', {
+      purpose: 'thinking-model',
+      completionState: 'partly-completed',
+      size: 'large',
+    }),
+    response: { type: 'lined-explanation', size: 'standard' },
+    composition: { footprint: 'full', startOnNewPage: true },
+    layout: { columnSpan: 'full', manualBreakBefore: true, pageHint: 6 },
+  });
+  const expandedMaster = {
+    ...originalMaster,
+    blocks: [
+      ...originalMaster.blocks,
+      newHeading,
+      newInstruction,
+      newCompactQuestion,
+      newLargeQuestion,
+    ],
+  };
+  const before = structuredClone(existing);
+  const reconciled = reconcileWorkbookCutoutVariant(expandedMaster, existing);
+
+  assert.deepEqual(existing, before, 'the helper must not mutate the supplied sparse version');
+  assert.equal(reconciled.id, existing.id);
+  assert.equal(reconciled.name, existing.name);
+  assert.equal(reconciled.overrides.blockPatches[resetQuestion.id], undefined, 'an intentional reset-to-master remains reset');
+  assert.deepEqual(reconciled.overrides.blockPatches[editedQuestion.id], existing.overrides.blockPatches[editedQuestion.id]);
+  assert.deepEqual(reconciled.overrides.addedBlocks, existing.overrides.addedBlocks);
+  assert.deepEqual(reconciled.overrides.order, existing.overrides.order);
+  assert.ok(reconciled.overrides.hiddenBlockIds.includes(removedQuestion.id));
+  assert.ok(reconciled.overrides.hiddenBlockIds.includes(newHeading.id));
+  assert.ok(reconciled.overrides.hiddenBlockIds.includes(newInstruction.id));
+
+  const resolved = resolveWorksheetVersion({
+    ...expandedMaster,
+    versions: { activeId: reconciled.id, items: [reconciled] },
+  }, reconciled.id);
+  assert.deepEqual(resolved.blocks.map((block) => block.id), [
+    editedQuestion.id,
+    resetQuestion.id,
+    workbookOnly.id,
+    newCompactQuestion.id,
+    newLargeQuestion.id,
+  ]);
+  assert.equal(resolved.blocks.find((block) => block.id === editedQuestion.id).displayText, 'Teacher-edited workbook wording');
+  assert.equal(resolved.blocks.find((block) => block.id === editedQuestion.id).model.size, 'extra-large');
+  assert.equal(resolved.blocks.find((block) => block.id === resetQuestion.id).composition.footprint, 'spacious');
+
+  const compact = resolved.blocks.find((block) => block.id === newCompactQuestion.id);
+  assert.equal(compact.section, null);
+  assert.equal(compact.model.size, 'standard');
+  assert.equal(compact.model.position, 'beneath');
+  assert.equal(compact.response.type, 'none');
+  assert.equal(compact.composition.footprint, 'half');
+  assert.equal(compact.composition.startOnNewPage, false);
+  assert.equal(compact.layout.columnSpan, 'half');
+  assert.equal(compact.layout.keepWithNext, false);
+  assert.equal(compact.layout.manualBreakBefore, false);
+  assert.equal(compact.layout.pageHint, 0);
+
+  const large = resolved.blocks.find((block) => block.id === newLargeQuestion.id);
+  assert.equal(large.section, null);
+  assert.equal(large.model.size, 'large');
+  assert.equal(large.response.type, 'lined-explanation');
+  assert.equal(large.response.size, 'compact');
+  assert.equal(large.composition.startOnNewPage, false);
+  assert.equal(large.layout.manualBreakBefore, false);
+  assert.strictEqual(
+    reconcileWorkbookCutoutVariant(expandedMaster, reconciled),
+    reconciled,
+    'reconciliation is an identity-preserving no-op once the baseline is current',
+  );
+});
+
+test('workbook reconciliation follows stable-ID kind transitions without revealing teacher-hidden questions', () => {
+  const becomesHeading = question('kind-question-to-heading', 'What is 7 × 8?');
+  const becomesQuestion = createQuestionBlock({
+    id: 'kind-heading-to-question',
+    kind: 'heading',
+    originalText: 'Reasoning',
+    displayText: 'Reasoning',
+  });
+  const instructionBecomesQuestion = createQuestionBlock({
+    id: 'kind-instruction-to-question',
+    kind: 'instruction',
+    originalText: 'Show your method.',
+    displayText: 'Show your method.',
+  });
+  const teacherHidden = question('kind-teacher-hidden', 'What is 9 × 9?');
+  const originalMaster = worksheet([becomesHeading, becomesQuestion, instructionBecomesQuestion, teacherHidden]);
+  const existing = createWorkbookCutoutVariant(originalMaster, { id: 'kind-workbook' });
+  existing.overrides.hiddenBlockIds.push(teacherHidden.id);
+
+  const changedMaster = {
+    ...originalMaster,
+    blocks: [
+      createQuestionBlock({
+        ...becomesHeading,
+        kind: 'heading',
+        originalText: 'New heading',
+        displayText: 'New heading',
+      }),
+      question(becomesQuestion.id, 'Place 3/4 on the number line.', {
+        section: 'new-section',
+        model: createModelRecipe('number-line', {
+          purpose: 'response-model',
+          completionState: 'partly-completed',
+          size: 'compact',
+        }),
+        response: { type: 'answer-box', size: 'standard' },
+        composition: { startOnNewPage: true },
+        layout: { manualBreakBefore: true, pageHint: 4 },
+      }),
+      question(instructionBecomesQuestion.id, 'Explain why 4 × 6 = 24.', {
+        section: 'new-section',
+        response: { type: 'lined-explanation', size: 'standard' },
+        composition: { startOnNewPage: true },
+        layout: { manualBreakBefore: true, pageHint: 5 },
+      }),
+      teacherHidden,
+    ],
+  };
+  const reconciled = reconcileWorkbookCutoutVariant(changedMaster, existing);
+  const resolved = resolveWorksheetVersion({
+    ...changedMaster,
+    versions: { activeId: reconciled.id, items: [reconciled] },
+  }, reconciled.id);
+
+  assert.notStrictEqual(reconciled, existing);
+  assert.ok(reconciled.overrides.hiddenBlockIds.includes(becomesHeading.id));
+  assert.ok(!reconciled.overrides.hiddenBlockIds.includes(becomesQuestion.id));
+  assert.ok(!reconciled.overrides.hiddenBlockIds.includes(instructionBecomesQuestion.id));
+  assert.ok(reconciled.overrides.hiddenBlockIds.includes(teacherHidden.id), 'a same-kind teacher-hidden question stays hidden');
+  assert.ok(reconciled.overrides.workbookAutoHiddenBlockIds.includes(becomesHeading.id));
+  assert.ok(!reconciled.overrides.workbookAutoHiddenBlockIds.includes(becomesQuestion.id));
+  assert.ok(!reconciled.overrides.workbookAutoHiddenBlockIds.includes(instructionBecomesQuestion.id));
+  assert.ok(!reconciled.overrides.workbookAutoHiddenBlockIds.includes(teacherHidden.id));
+  assert.deepEqual(resolved.blocks.map((block) => block.id), [becomesQuestion.id, instructionBecomesQuestion.id]);
+
+  const located = resolved.blocks.find((block) => block.id === becomesQuestion.id);
+  assert.equal(located.section, null);
+  assert.equal(located.model.size, 'standard');
+  assert.equal(located.response.type, 'none');
+  assert.equal(located.composition.footprint, 'half');
+  assert.equal(located.composition.startOnNewPage, false);
+  assert.equal(located.layout.manualBreakBefore, false);
+  assert.equal(located.layout.pageHint, 0);
+
+  const explanation = resolved.blocks.find((block) => block.id === instructionBecomesQuestion.id);
+  assert.equal(explanation.section, null);
+  assert.equal(explanation.response.type, 'lined-explanation');
+  assert.equal(explanation.response.size, 'compact');
+  assert.equal(explanation.composition.footprint, 'half');
+  assert.equal(reconciled.overrides.workbookMasterBlockKinds[becomesHeading.id], 'heading');
+  assert.equal(reconciled.overrides.workbookMasterBlockKinds[becomesQuestion.id], 'question');
+  assert.equal(reconciled.overrides.workbookMasterBlockKinds[instructionBecomesQuestion.id], 'question');
+  assert.strictEqual(reconcileWorkbookCutoutVariant(changedMaster, reconciled), reconciled);
+});
+
+test('a teacher-hidden question stays hidden through a question-heading-question round trip', () => {
+  const original = question('teacher-hidden-round-trip', 'What is 7 × 6?', {
+    response: { type: 'lined-explanation', size: 'standard' },
+  });
+  const master = worksheet([original]);
+  const workbook = createWorkbookCutoutVariant(master, { id: 'hidden-round-trip-workbook' });
+  workbook.overrides.hiddenBlockIds.push(original.id);
+
+  const asHeading = createQuestionBlock({
+    ...original,
+    kind: 'heading',
+    originalText: 'Reasoning',
+    displayText: 'Reasoning',
+  });
+  const headingMaster = { ...master, blocks: [asHeading] };
+  const afterHeading = reconcileWorkbookCutoutVariant(headingMaster, workbook);
+  assert.ok(afterHeading.overrides.hiddenBlockIds.includes(original.id));
+  assert.ok(!afterHeading.overrides.workbookAutoHiddenBlockIds.includes(original.id), 'an existing teacher hide never becomes system-owned');
+
+  const backToQuestion = question(original.id, 'Explain why 7 × 6 = 42.', {
+    section: 'reasoning-section',
+    response: { type: 'lined-explanation', size: 'standard' },
+    composition: { startOnNewPage: true },
+    layout: { manualBreakBefore: true, pageHint: 3 },
+  });
+  const questionMaster = { ...master, blocks: [backToQuestion] };
+  const afterQuestion = reconcileWorkbookCutoutVariant(questionMaster, afterHeading);
+  const resolved = resolveWorksheetVersion({
+    ...questionMaster,
+    versions: { activeId: afterQuestion.id, items: [afterQuestion] },
+  }, afterQuestion.id);
+
+  assert.ok(afterQuestion.overrides.hiddenBlockIds.includes(original.id));
+  assert.ok(!afterQuestion.overrides.workbookAutoHiddenBlockIds.includes(original.id));
+  assert.deepEqual(resolved.blocks, [], 'the teacher-hidden question must not be exposed after its kind returns');
+  assert.equal(afterQuestion.overrides.blockPatches[original.id].section, null);
+  assert.equal(afterQuestion.overrides.blockPatches[original.id].composition.startOnNewPage, false);
+  assert.equal(afterQuestion.overrides.blockPatches[original.id].layout.manualBreakBefore, false);
+  assert.strictEqual(reconcileWorkbookCutoutVariant(questionMaster, afterQuestion), afterQuestion);
+});
+
+test('real workbook edits and resets retain reconciliation provenance for later master additions', () => {
+  const original = question('provenance-original', 'Explain why 8 × 4 = 32.', {
+    response: { type: 'lined-explanation', size: 'generous' },
+    composition: { pattern: 'reasoning', footprint: 'spacious' },
+    layout: { columnSpan: 'full' },
+  });
+  const master = worksheet([original]);
+  const workbook = createWorkbookCutoutVariant(master, { id: 'provenance-workbook' });
+  let state = {
+    ...master,
+    versions: { activeId: workbook.id, items: [workbook] },
+  };
+
+  state = worksheetReducer(state, {
+    ...worksheetActions.applyVersionAction(
+      workbook.id,
+      worksheetActions.updateBlock(original.id, { displayText: 'Workbook-only wording.' }),
+    ),
+    timestamp: later(1),
+  });
+  let savedWorkbook = state.versions.items.find((version) => version.id === workbook.id);
+  assert.deepEqual(savedWorkbook.overrides.workbookMasterBlockIds, workbook.overrides.workbookMasterBlockIds);
+  assert.deepEqual(savedWorkbook.overrides.workbookMasterBlockKinds, workbook.overrides.workbookMasterBlockKinds);
+  assert.deepEqual(savedWorkbook.overrides.workbookAutoHiddenBlockIds, workbook.overrides.workbookAutoHiddenBlockIds);
+
+  state = worksheetReducer(state, {
+    ...worksheetActions.resetVersionBlock(workbook.id, original.id),
+    timestamp: later(2),
+  });
+  state = worksheetReducer(state, {
+    ...worksheetActions.setActiveVersion('master'),
+    timestamp: later(3),
+  });
+  const laterQuestion = question('provenance-later', 'What is 7 × 6?', {
+    response: { type: 'lined-explanation', size: 'generous' },
+    composition: { pattern: 'reasoning', footprint: 'spacious', startOnNewPage: true },
+    layout: { columnSpan: 'full', manualBreakBefore: true, pageHint: 3 },
+  });
+  state = worksheetReducer(state, {
+    ...worksheetActions.addBlock(laterQuestion),
+    timestamp: later(4),
+  });
+
+  savedWorkbook = state.versions.items.find((version) => version.id === workbook.id);
+  assert.equal(savedWorkbook.overrides.blockPatches[original.id], undefined, 'the deliberate reset stays reset');
+  const reconciled = reconcileWorkbookCutoutVariant(state, savedWorkbook);
+  const resolved = resolveWorksheetVersion({
+    ...state,
+    versions: { activeId: reconciled.id, items: [reconciled] },
+  }, reconciled.id);
+  const reset = resolved.blocks.find((block) => block.id === original.id);
+  const added = resolved.blocks.find((block) => block.id === laterQuestion.id);
+
+  assert.equal(reset.response.size, 'generous');
+  assert.equal(reset.composition.footprint, 'spacious');
+  assert.equal(reset.layout.columnSpan, 'full');
+  assert.equal(added.response.size, 'compact');
+  assert.equal(added.composition.footprint, 'half');
+  assert.equal(added.composition.startOnNewPage, false);
+  assert.equal(added.layout.columnSpan, 'half');
+  assert.equal(added.layout.manualBreakBefore, false);
+});
+
+test('workbook reconciliation safely migrates real pre-v4 visible decorative blocks', () => {
+  const visibleHeading = createQuestionBlock({
+    id: 'legacy-visible-heading',
+    kind: 'heading',
+    originalText: 'Reasoning',
+    displayText: 'Reasoning',
+  });
+  const visibleInstruction = createQuestionBlock({
+    id: 'legacy-visible-instruction',
+    kind: 'instruction',
+    originalText: 'Show your method.',
+    displayText: 'Show your method.',
+  });
+  const visibleQuestion = question('legacy-visible-question', 'What is 9 × 4?');
+  const resetQuestion = question('legacy-reset-question', 'Explain why 5 × 6 = 30.', {
+    section: 'teacher-section',
+    response: { type: 'lined-explanation', size: 'generous' },
+    composition: { pattern: 'reasoning', footprint: 'spacious', startOnNewPage: true },
+    layout: { columnSpan: 'full', manualBreakBefore: true, pageHint: 4 },
+  });
+  const teacherHidden = question('legacy-teacher-hidden-question', 'What is 12 × 3?');
+  const master = worksheet([visibleHeading, visibleInstruction, visibleQuestion, resetQuestion, teacherHidden]);
+  // Old workbook generation retained headings/instructions as visible full
+  // width patched blocks and had neither workbookMode nor provenance fields.
+  const legacy = {
+    id: 'legacy-workbook',
+    name: 'Workbook cut-outs',
+    type: 'custom',
+    baseId: 'master',
+    createdAt: NOW,
+    outputView: 'pupil',
+    overrides: {
+      settings: { columns: 2, density: 'compact' },
+      architecture: { compositionMode: 'rows' },
+      pageArrangement: {},
+      blockPatches: {
+        [visibleHeading.id]: { composition: { footprint: 'compact' }, layout: { columnSpan: 'full' } },
+        [visibleInstruction.id]: { composition: { footprint: 'compact' }, layout: { columnSpan: 'full' } },
+        [visibleQuestion.id]: { composition: { footprint: 'half' }, layout: { columnSpan: 'half' } },
+      },
+      hiddenBlockIds: [teacherHidden.id],
+      addedBlocks: [],
+      order: null,
+      outputView: 'pupil',
+    },
+  };
+  const before = structuredClone(legacy);
+  const reconciled = reconcileWorkbookCutoutVariant(master, legacy);
+  const resolved = resolveWorksheetVersion({
+    ...master,
+    versions: { activeId: reconciled.id, items: [reconciled] },
+  }, reconciled.id);
+
+  assert.deepEqual(legacy, before);
+  assert.ok(reconciled.overrides.hiddenBlockIds.includes(visibleHeading.id));
+  assert.ok(reconciled.overrides.hiddenBlockIds.includes(visibleInstruction.id));
+  assert.ok(reconciled.overrides.hiddenBlockIds.includes(teacherHidden.id), 'migration never exposes a teacher-hidden current question');
+  assert.deepEqual(resolved.blocks.map((block) => block.id), [visibleQuestion.id, resetQuestion.id]);
+  const preservedReset = resolved.blocks.find((block) => block.id === resetQuestion.id);
+  assert.equal(reconciled.overrides.blockPatches[resetQuestion.id], undefined);
+  assert.equal(preservedReset.section, 'teacher-section');
+  assert.equal(preservedReset.response.type, 'lined-explanation');
+  assert.equal(preservedReset.response.size, 'generous');
+  assert.equal(preservedReset.composition.pattern, 'reasoning');
+  assert.equal(preservedReset.composition.footprint, 'spacious');
+  assert.equal(preservedReset.composition.startOnNewPage, true);
+  assert.equal(preservedReset.layout.columnSpan, 'full');
+  assert.equal(preservedReset.layout.manualBreakBefore, true);
+  assert.equal(preservedReset.layout.pageHint, 4);
+  assert.deepEqual(reconciled.overrides.workbookMasterBlockIds, master.blocks.map((block) => block.id));
+  assert.deepEqual(reconciled.overrides.workbookMasterBlockKinds, {
+    [visibleHeading.id]: 'heading',
+    [visibleInstruction.id]: 'instruction',
+    [visibleQuestion.id]: 'question',
+    [resetQuestion.id]: 'question',
+    [teacherHidden.id]: 'question',
+  });
+  assert.deepEqual(reconciled.overrides.workbookAutoHiddenBlockIds, [visibleHeading.id, visibleInstruction.id]);
+  assert.strictEqual(reconcileWorkbookCutoutVariant(master, reconciled), reconciled);
+});
+
+test('labelled wide models remain full width on ordinary worksheets too', () => {
+  const location = question('ordinary-wide-line', 'Place 2 1/2 on the number line from 2 to 3.', {
+    model: createModelRecipe('number-line', {
+      values: { start: 2, end: 3, divisions: 4, markers: [{ value: 2.5, label: '2 1/2' }] },
+      unknown: 'marker:0',
+      purpose: 'response-model',
+      completionState: 'partly-completed',
+      size: 'standard',
+    }),
+    response: { type: 'none', size: 'compact' },
+    composition: { footprint: 'half' },
+    layout: { columnSpan: 'half' },
+  });
+  const state = worksheet([location], {
+    settings: { columns: 2 },
+    architecture: { compositionMode: 'rows' },
+  });
+  const result = paginateWorksheet(state);
+
+  assert.equal(result.placements[location.id].widthMm, result.geometry.contentWidthMm);
+  assert.deepEqual(result.tooSmallModelBlockIds, []);
+});
+
+test('teacher-only wide models use the same full-width print rule as pupil models', () => {
+  const blocks = [1, 2].map((number) => question(`teacher-line-${number}`, `Teacher example ${number}.`, {
+    model: null,
+    teacher: {
+      completedModel: createModelRecipe('number-line', {
+        values: { start: 0, end: 100, divisions: 10, markers: [{ value: number * 25, label: String(number * 25) }] },
+        purpose: 'worked-example',
+        completionState: 'completed',
+        size: 'standard',
+      }),
+    },
+    composition: { footprint: 'half' },
+    layout: { columnSpan: 'half' },
+  }));
+  const state = worksheet(blocks, {
+    settings: { columns: 2 },
+    architecture: { compositionMode: 'rows' },
+  });
+  const result = paginateWorksheet(state, { outputView: 'teacher' });
+
+  assert.ok(blocks.every((block) => result.placements[block.id].widthMm === result.geometry.contentWidthMm));
+  assert.deepEqual(result.tooSmallModelBlockIds, []);
 });
 
 test('fourteen-row table and labelled-step spaces reserve every fixed-height print row', () => {

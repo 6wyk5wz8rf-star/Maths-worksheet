@@ -156,6 +156,22 @@ test("number-line normalization guarantees equal intervals", () => {
   assert.deepEqual(gaps, [4, 4, 4, 4, 4, 4]);
 });
 
+test("wide model size choices progressively enlarge the complete printed representation", () => {
+  const viewBoxes = ["compact", "standard", "large", "extra-large"].map((size) => {
+    const html = renderModel(createModelRecipe(MODEL_IDS.NUMBER_LINE, {
+      size,
+      values: { start: 0, end: 10, divisions: 5, markers: [] },
+    }));
+    const match = html.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/);
+    assert.ok(match, `${size} number line needs an explicit viewBox`);
+    return { width: Number(match[1]), height: Number(match[2]) };
+  });
+
+  assert.deepEqual(viewBoxes.map(({ width }) => width), [980, 900, 760, 660]);
+  assert.ok(viewBoxes.every(({ width }, index) => index === 0 || width < viewBoxes[index - 1].width));
+  assert.ok(viewBoxes.every(({ height }, index) => index === 0 || height >= viewBoxes[index - 1].height));
+});
+
 test("number-line divisions are bounded and out-of-range markers are omitted with warnings", () => {
   const validation = validateRecipe(createModelRecipe(MODEL_IDS.NUMBER_LINE, {
     values: {

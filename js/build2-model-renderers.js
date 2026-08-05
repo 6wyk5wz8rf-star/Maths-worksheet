@@ -97,13 +97,14 @@ function svgText(x, y, value, options = {}) {
   const size = options.size ?? 14;
   const fill = options.fill ?? ink;
   const weight = options.weight ?? 500;
-  return `<text x="${x}" y="${y}" text-anchor="${anchor}" font-family="Arial, sans-serif" font-size="${size}" font-weight="${weight}" fill="${fill}">${escapeMarkup(value)}</text>`;
+  return `<text x="${x}" y="${y}" text-anchor="${anchor}" font-family="Arial, sans-serif" font-size="${size}" style="font-size:calc(${size}px * var(--mps-model-text-scale, 1))" font-weight="${weight}" fill="${fill}">${escapeMarkup(value)}</text>`;
 }
 
 function svgFrame(recipe, definition, content, options = {}, viewBox = `0 0 ${WIDTH} ${HEIGHT}`) {
   const description = escapeMarkup(options.accessibleDescription ?? describeBuild2Model(recipe));
   const id = modelId(recipe, options);
-  return `<figure class="mps-build2-model mps-build2-model--${escapeMarkup(recipe.family)}" data-build2-model="${escapeMarkup(recipe.family)}">
+  const textScale = ({ compact: 0.92, standard: 1, large: 1.14, 'extra-large': 1.28 })[recipe.size] ?? 1;
+  return `<figure class="mps-build2-model mps-build2-model--${escapeMarkup(recipe.family)} mps-build2-model--${escapeMarkup(recipe.size)}" data-build2-model="${escapeMarkup(recipe.family)}" data-model-size="${escapeMarkup(recipe.size)}" style="--mps-model-text-scale:${textScale}">
     <svg class="mps-build2-model__svg" viewBox="${viewBox}" role="img" aria-label="${description}" xmlns="http://www.w3.org/2000/svg">
       <title>${escapeMarkup(definition.name)}</title><desc>${description}</desc>
       <defs><pattern id="${id}-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" stroke="#6a6680" stroke-width="2"/></pattern><marker id="${id}-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5 0 10z" fill="#4f568f"/></marker></defs>

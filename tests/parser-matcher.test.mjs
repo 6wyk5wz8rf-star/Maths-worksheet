@@ -153,6 +153,23 @@ test('a spaced slash is a division operator while compact and explicit fraction 
   assert.deepEqual(explicitSpacedFraction.fractions.map(({ numerator, denominator }) => [numerator, denominator]), [[3, 4]]);
 });
 
+test('each only signals multiplication when its clause contains a repeated quantity', () => {
+  const instruction = extractMathInfo('Put <, > or = between each pair: 3,405 ___ 3,450.');
+  const repeatedQuantity = extractMathInfo('There are 6 bags with 8 apples in each bag. How many apples are there altogether?');
+
+  assert.equal(instruction.operations.includes('multiplication'), false);
+  assert.deepEqual(repeatedQuantity.operations, ['multiplication']);
+  assert.equal(matchQuestionToModels(repeatedQuantity).provisionalRecipe?.family, 'equal-groups');
+});
+
+test('short unit symbols never consume the beginning of ordinary words', () => {
+  const more = extractMathInfo('What is 100 more than 3,506?');
+  const less = extractMathInfo('What is 1,000 less than 7,230?');
+
+  assert.deepEqual(more.units, []);
+  assert.deepEqual(less.units, []);
+});
+
 test('time extraction retains meridiem and normalises it for exact duration arithmetic', () => {
   const info = extractMathInfo('How long is it from 11:30 am to 1:00 pm?');
 
@@ -368,4 +385,86 @@ test('does not automatically duplicate a representation referenced in the source
   assert.equal(result.provisionalRecipe, null);
   assert.equal(result.noModelRecommended, true);
   assert.match(result.warnings.join(' '), /duplicate model/i);
+});
+
+test('common referenced visuals fail closed instead of creating demonstration data', () => {
+  const sources = [
+    'What time does this clock show?',
+    'Use the table to answer the question. How many children chose red?',
+    'The pictogram shows favourite pets. How many children chose cats?',
+    'What fraction of this shape is shaded?',
+    'What time is shown?',
+    'What time is it?',
+    'What fraction is shaded?',
+    'Complete the table.',
+    'Use the information in the table to find the total.',
+  ];
+
+  for (const source of sources) {
+    const info = extractMathInfo(source);
+    const result = matchQuestionToModels(info);
+    assert.equal(info.hasExistingRepresentation, true, source);
+    assert.equal(result.interpretation.status, 'needs-referenced-visual', source);
+    assert.equal(result.provisionalRecipe, null, source);
+    assert.equal(result.noModelRecommended, true, source);
+    assert.deepEqual(result.suggestions, [], source);
+  }
+});
+
+test('a sharing remainder question uses an exact protected sharing model', () => {
+  const source = 'Share 27 sweets equally between 4 children. How many are left over?';
+  const info = extractMathInfo(source);
+  const result = matchQuestionToModels(info);
+
+  assert.deepEqual(info.operations, ['division']);
+  assert.equal(info.divisionInterpretation, 'sharing');
+  assert.equal(result.interpretation.status, 'resolved');
+  assert.equal(result.interpretation.mathematicalStructure.unknownPosition, 'remainder');
+  assert.equal(result.provisionalRecipe?.family, 'sharing-division');
+  assert.equal(result.provisionalRecipe?.values.total, 27);
+  assert.equal(result.provisionalRecipe?.values.groups, 4);
+  assert.equal(result.provisionalRecipe?.unknown, 'remainder');
+  assert.ok(result.provisionalRecipe?.hidden.includes('remainder'));
+
+  const validation = validateRecipe(result.provisionalRecipe);
+  assert.equal(validation.valid, true);
+  const pupil = renderModel(validation.normalizedRecipe);
+  assert.equal((pupil.match(/<circle\b/g) ?? []).length, 24);
+  assert.match(pupil, /leftover \?/);
+  assert.doesNotMatch(pupil, /leftover 3/);
+});
+
+test('low-confidence or compound readings never become automatic models', () => {
+  const sources = [
+    'Use 100 and 3,506. What could the answer be?',
+    'There are 32 children. They sit at tables of 6. How many tables are needed?',
+    'There are 5 boxes. Each box holds 8 pencils. Then 7 pencils are used. How many remain?',
+  ];
+  const rank = { low: 0, medium: 1, high: 2 };
+
+  for (const source of sources) {
+    const result = matchQuestionToModels(source);
+    assert.ok(rank[result.confidence] <= rank[result.interpretation.confidence], source);
+    assert.equal(result.interpretation.needsReview, true, source);
+    assert.equal(result.provisionalRecipe, null, source);
+    assert.equal(result.noModelRecommended, true, source);
+  }
+  assert.notEqual(matchQuestionToModels(sources[1]).suggestions[0]?.family, 'bar-chart');
+});
+
+test('direct more-or-less transformations use a truthful change model', () => {
+  const increase = matchQuestionToModels('What is 100 more than 3,506?');
+  const decrease = matchQuestionToModels('What is 1,000 less than 7,230?');
+
+  assert.equal(increase.provisionalRecipe?.family, 'change-bar');
+  assert.equal(increase.interpretation.status, 'resolved');
+  assert.deepEqual(increase.provisionalRecipe?.values, {
+    start: 3506, change: 100, result: 3606, direction: 'increase', greater: 3506, lesser: 100,
+  });
+  assert.equal(increase.provisionalRecipe?.unknown, 'result');
+  assert.equal(decrease.provisionalRecipe?.family, 'change-bar');
+  assert.equal(decrease.provisionalRecipe?.values.start, 7230);
+  assert.equal(decrease.provisionalRecipe?.values.change, -1000);
+  assert.equal(decrease.provisionalRecipe?.values.result, 6230);
+  assert.equal(decrease.provisionalRecipe?.unknown, 'result');
 });

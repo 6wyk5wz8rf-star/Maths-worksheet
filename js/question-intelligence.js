@@ -293,17 +293,21 @@ function rationalTokenValue(value) {
  */
 export function parseNumberLinePrompt(input) {
   const source = String(input ?? '');
-  const range = source.match(new RegExp(`\\b(?:from|between)\\s+(${NUMBER_SOURCE})(?:\\s*(?:km|m|cm|mm|l|ml|kg|g))?\\s+(?:to|and)\\s+(${NUMBER_SOURCE})`, 'i'));
+  const range = source.match(new RegExp(`\\b(?:from|between)\\s+(${RATIONAL_TOKEN_SOURCE})(?:\\s*(?:km|m|cm|mm|l|ml|kg|g))?\\s+(?:to|and)\\s+(${RATIONAL_TOKEN_SOURCE})`, 'i'));
   if (!range) return null;
-  const start = cleanNumber(range[1]);
-  const end = cleanNumber(range[2]);
+  const start = rationalTokenValue(range[1])?.value ?? null;
+  const end = rationalTokenValue(range[2])?.value ?? null;
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
 
   const directTarget = source.match(new RegExp(`\\b(?:place|mark|locate|plot)\\s+(${RATIONAL_TOKEN_SOURCE})(?=\\s+(?:on|along)\\s+(?:an?\\s+)?number\\s+line\\b)`, 'i'));
   const tokenPattern = new RegExp(RATIONAL_TOKEN_SOURCE, 'gi');
   const fractionTargets = [...source.matchAll(tokenPattern)]
     .map((match) => rationalTokenValue(match[0]))
-    .filter((value) => value?.isFraction && value.value >= start && value.value <= end);
+    .filter((value) => value?.isFraction
+      && value.value >= start
+      && value.value <= end
+      && value.value !== start
+      && value.value !== end);
   const targetInfo = rationalTokenValue(directTarget?.[1])
     ?? fractionTargets[0]
     ?? null;
@@ -599,11 +603,15 @@ function detectDomains(info, source, equation = null) {
   const scores = new Map();
   const has = (pattern) => pattern.test(lower);
   const timesTable = has(/\b(?:\d+\s+)?times\s+tables?\b/);
-  if (has(/\b(?:place value|digit|thousands?|hundreds?|tens?|ones?|partition|expanded form|roman numeral|negative number)\b/)) addScore(scores, 'Number and place value', 8);
-  if (has(/\b(?:round|nearest|order|compare|greater than|less than)\b/)) addScore(scores, 'Number and place value', 4);
+  if (has(/\b(?:place value|digit|thousands?|hundreds?|tens?|ones?|partition|expanded form|roman numeral|negative number|base[- ]ten|dienes?)\b/)
+    || has(/\bvalue\s+of\s+(?:the\s+)?(?:digit\s*)?\d/)) addScore(scores, 'Number and place value', 8);
+  if (has(/\b(?:round|nearest)\b/)) addScore(scores, 'Number and place value', 8);
+  if (has(/\b(?:order|compare|greater than|less than)\b/) || (info.comparisonLanguage?.length ?? 0) > 0) {
+    addScore(scores, 'Number and place value', 8);
+  }
   if (info.operations.includes('addition') || has(/\b(?:add|sum|altogether|combined)\b/)) addScore(scores, 'Addition', 7);
   if (info.operations.includes('subtraction') || has(/\b(?:subtract|take away|fewer|difference|remain)\b/)) addScore(scores, 'Subtraction', 7);
-  if (info.operations.includes('multiplication') || has(/\b(?:multiply|times|product|groups? of|each)\b/)) addScore(scores, 'Multiplication', 7);
+  if (info.operations.includes('multiplication') || has(/\b(?:multiply|times|product|groups? of)\b/)) addScore(scores, 'Multiplication', 7);
   if (info.operations.includes('division') || has(/\b(?:divide|share|shared|grouping|remainder)\b/)) addScore(scores, 'Division', 7);
   // Boxed equations do not always make it through the lightweight importer as
   // an operation token. The local equation parser is exact, so it is safe to
@@ -619,7 +627,8 @@ function detectDomains(info, source, equation = null) {
   if (has(/\b(?:area|square centimetres?|cm²|square units?)\b/)) addScore(scores, 'Area', 12);
   if (has(/\b(?:angle|triangle|quadrilateral|polygon|parallel|perpendicular|symmetry|reflect)\b/)) addScore(scores, 'Geometry', 10);
   if (has(/\b(?:coordinate|axis|axes|clockwise|anticlockwise|turn)\b/)) addScore(scores, 'Position and direction', 10);
-  if (has(/\b(?:chart|graph|pictogram|frequency|tally|data)\b/) || (!timesTable && has(/\btables?\b/))) addScore(scores, 'Statistics', 10);
+  if (has(/\b(?:chart|graph|pictogram|frequency|tally|data)\b/)
+    || (!timesTable && has(/\b(?:use|read|complete)\s+the\s+table\b|\btable\s+(?:below|above|shown|provided|gives?|shows?)\b/))) addScore(scores, 'Statistics', 10);
   // A single explicit time is enough for a clock-drawing task.  Requiring two
   // times here would leave "Draw the hands to show 14:35" without a Time
   // domain or a safe blank clock.
@@ -634,7 +643,8 @@ function detectDomains(info, source, equation = null) {
 function inferQuestionFamily(source, info, equation) {
   const lower = source.toLowerCase();
   const includes = (pattern) => pattern.test(lower);
-  if (includes(/\b(?:find|spot|identify|explain)\s+(?:the )?(?:mistake|error)\b/) || includes(/\b(?:says|thinks)\b.*\b(?:because|but)\b/)) return 'find-error';
+  if (includes(/\b(?:find|spot|identify|explain)\s+(?:the )?(?:mistake|error)\b/)
+    || includes(/\b(?:says?|thinks?|claims?|believes?)\b[\s\S]*\b(?:because|but|correct|right|agree|true|false)\b/)) return 'find-error';
   if (includes(/\bcorrect (?:the )?(?:mistake|error)\b/)) return 'correct-error';
   if (includes(/\b(?:prove|convince)\b/)) return 'prove';
   if (includes(/\b(?:justify|explain why|explain how)\b/)) return 'justify';
@@ -659,6 +669,9 @@ function inferQuestionFamily(source, info, equation) {
     || includes(/\b(?:mark|place|locate)\s+where\s+it\s+belongs\s+between\b/)) return 'locate-on-number-line';
   if (includes(/\b(?:what is|find)\s+the\s+value\s+of\s+(?:the\s+)?(?:digit\s*)?\d/)) return 'identify-place-value';
   if (includes(/\b(?:order|arrange)\b/)) return 'order';
+  if ((info.comparisonLanguage?.length ?? 0) > 0
+    && includes(/\b(?:put|write|choose|insert|place)\b[\s\S]*\b(?:between|symbol|sign|pair)\b/)) return 'compare';
+  if (directMoreLessChange(lower)) return 'calculate';
   if (includes(/\b(?:compare|greater than|less than|how many more|how many fewer|difference)\b/)
     || includes(/\b(?:has|have|is)\s+\d[\d,]*(?:\.\d+)?\s+(?:fewer|less)\b/)) return 'compare';
   if (includes(/\b(?:partition|expanded form|decompose)\b/)) return 'partition';
@@ -683,6 +696,16 @@ function inferQuestionFamily(source, info, equation) {
   return info.numericValues?.length >= 2 ? 'word-problem' : 'explain';
 }
 
+function directMoreLessChange(source) {
+  const match = String(source).match(new RegExp(`\\b(?:what\\s+is|find|calculate)\\s+(${NUMBER_SOURCE})\\s+(more|less|fewer)\\s+than\\s+(${NUMBER_SOURCE})\\b`, 'i'));
+  if (!match) return null;
+  return {
+    change: cleanNumber(match[1]),
+    operation: match[2].toLowerCase() === 'more' ? 'addition' : 'subtraction',
+    start: cleanNumber(match[3]),
+  };
+}
+
 function inferRepresentationPurpose(family, source, info) {
   const lower = source.toLowerCase();
   if (['find-error', 'correct-error', 'justify', 'prove', 'explain'].includes(family)) return 'support-reasoning-or-proof';
@@ -695,10 +718,25 @@ function inferRepresentationPurpose(family, source, info) {
   return 'blank-pupil-workspace';
 }
 
-function nearestMagnitude(source) {
+function nearestMagnitudeDetails(source) {
   const match = source.match(/\bnearest\s+(10|100|1,?000|ten|tens|hundred|hundreds|thousand|thousands)\b/i);
   const key = match?.[1].toLowerCase().replace(/,/g, '');
-  return key ? ROUNDING_MAGNITUDES[key] ?? null : null;
+  const magnitude = key ? ROUNDING_MAGNITUDES[key] ?? null : null;
+  return magnitude && match ? {
+    magnitude,
+    start: match.index,
+    end: match.index + match[0].length,
+  } : null;
+}
+
+function roundingTargetValues(info, magnitudeDetails) {
+  const values = (info.numbers ?? [])
+    .filter((quantity) => !magnitudeDetails
+      || quantity.start < magnitudeDetails.start
+      || quantity.end > magnitudeDetails.end)
+    .map((quantity) => quantity.value)
+    .filter(Number.isFinite);
+  return values;
 }
 
 function deriveWordStructure(info, source, family, equation) {
@@ -707,6 +745,8 @@ function deriveWordStructure(info, source, family, equation) {
   const wholeNumbers = values.filter(Number.isInteger);
   const first = values[0] ?? null;
   const second = values[1] ?? null;
+  const asksForRemainder = (info.operations?.includes('division') || info.divisionInterpretation)
+    && /\bhow\s+many(?:\s+\w+){0,3}\s+(?:are\s+)?left over\b|\b(?:what(?:'s| is)|find|give)\s+(?:the\s+)?remainder\b/i.test(lower);
   const result = {
     whole: null,
     parts: [],
@@ -727,10 +767,11 @@ function deriveWordStructure(info, source, family, equation) {
     midpoint: null,
     scale: null,
     unit: info.units?.[0] ?? null,
-    unknownPosition: equation?.unknownPosition ?? null,
+    unknownPosition: equation?.unknownPosition ?? (asksForRemainder ? 'remainder' : null),
     equality: equation ? { operator: equation.operator, privateDerivedAnswer: equation.privateDerivedAnswer } : null,
     comparison: null,
     rounding: null,
+    roundingTargets: [],
     measurement: null,
     chart: null,
   };
@@ -750,12 +791,22 @@ function deriveWordStructure(info, source, family, equation) {
   }
 
   if (family === 'round') {
-    const magnitude = nearestMagnitude(lower);
-    const target = values.find(Number.isFinite) ?? null;
-    result.rounding = magnitude && target !== null ? roundingBounds(target, magnitude) : null;
-    result.interval = magnitude;
+    const magnitudeDetails = nearestMagnitudeDetails(info.analysedText ?? lower);
+    const targets = roundingTargetValues(info, magnitudeDetails);
+    const target = targets.length === 1 ? targets[0] : null;
+    result.roundingTargets = targets;
+    result.rounding = magnitudeDetails && target !== null ? roundingBounds(target, magnitudeDetails.magnitude) : null;
+    result.interval = magnitudeDetails?.magnitude ?? null;
     result.midpoint = result.rounding?.midpoint ?? null;
-    result.unknownPosition ??= 'rounded-value';
+    result.unknownPosition ??= targets.length > 1 ? 'rounded-values' : 'rounded-value';
+  }
+
+  const directChange = family === 'calculate' ? directMoreLessChange(lower) : null;
+  if (directChange) {
+    result.startValue = directChange.start;
+    result.change = directChange.change;
+    result.operation = directChange.operation;
+    result.unknownPosition ??= 'result';
   }
 
   const fraction = info.fractions?.[0] ?? fractionFromWords(lower);
@@ -943,6 +994,7 @@ function answerProtection(family, source, structure, equation) {
   if (family === 'find-perimeter') add('perimeter', 'The calculated perimeter must not be printed in the model.');
   if (family === 'locate-on-number-line') add('line-position', 'The pupil must choose the position on the supplied scale.');
   if (structure.unknownPosition === 'fraction-of-quantity-result') add('fraction-of-quantity-result', 'The selected fraction of the quantity is the pupil calculation.');
+  if (structure.unknownPosition === 'remainder') add('remainder', 'The leftover quantity is the pupil calculation.');
   if (family === 'find-error' || family === 'correct-error') add('correction', 'The source misconception must remain visible for analysis.');
   const risk = prohibited.size >= 2 || equation?.unknownPosition ? 'high' : prohibited.size ? 'medium' : 'low';
   return {
@@ -959,6 +1011,16 @@ function interpretationConfidence(info, family, structure, domains, equation) {
   if (equation?.exact) score += 3;
   if (structure.comparison || structure.rounding || structure.measurement || structure.scale || structure.numerator !== null || structure.numberOfGroups !== null) score += 2;
   if (info.operations.length === 1) score += 1;
+  const source = info.analysedText ?? '';
+  const explicitTaskStructure =
+    (family === 'identify-place-value' && /\bvalue\s+of\s+(?:the\s+)?(?:digit\s*)?\d/i.test(source))
+    || (family === 'partition' && /\b(?:partition|expanded form|decompose)\b/i.test(source))
+    || (family === 'represent' && /\b(?:dienes?|base[- ]ten|place[- ]value blocks?|array|number line|fraction strip|bar model)\b/i.test(source))
+    || (family === 'compare' && (info.comparisonLanguage?.length ?? 0) > 0 && /\b(?:put|write|choose|insert|place)\b/i.test(source))
+    || (family === 'construct-chart' && /\b(?:draw|construct|complete|make)\b[\s\S]*\b(?:chart|graph|pictogram)\b/i.test(source))
+    || (family === 'draw-hands' && /\b(?:draw|show)\b[\s\S]*\b(?:hands?|clock)\b/i.test(source) && (info.times?.length ?? 0) >= 1)
+    || (family === 'calculate' && info.operations.length === 1 && (/\b(?:calculate|work out|solve|find)\b|\d\s*[+\u2212\-\u00d7\u00f7]\s*\d/i.test(source) || directMoreLessChange(source)));
+  if (explicitTaskStructure) score += 2;
   if (info.operations.length > 1 && !/\b(?:two-step|multi-step)\b/i.test(info.analysedText)) score -= 2;
   if (family === 'word-problem' || family === 'explain') score -= 1;
   if (score >= 5) return 'high';
@@ -971,8 +1033,12 @@ function interpretationConfidence(info, family, structure, domains, equation) {
  * here changes question wording or makes a private answer pupil-visible.
  */
 export function analyseQuestion(input, overrides = {}) {
-  const info = asInfo(input);
-  const source = normaliseMathsText(info.analysedText ?? info.rawText ?? '');
+  const parsedInfo = asInfo(input);
+  const source = normaliseMathsText(parsedInfo.analysedText ?? parsedInfo.rawText ?? '');
+  const directChange = directMoreLessChange(source);
+  const info = directChange && !(parsedInfo.operations ?? []).length
+    ? { ...parsedInfo, operations: [directChange.operation] }
+    : parsedInfo;
   const fractionEquality = parseFractionEquality(source);
   const equation = fractionEquality ? null : parseSimpleEquation(source);
   let domains = detectDomains(info, source, equation);
@@ -1012,9 +1078,19 @@ export function analyseQuestion(input, overrides = {}) {
     : interpretationConfidence(info, questionFamily, structure, domains, equation);
   const numerical = numericCharacteristics(info, source, structure);
   const needsReview = confidence === 'low'
-    || (info.operations.length > 1 && questionFamily !== 'calculate')
+    || info.operations.length > 1
     || info.divisionInterpretation === 'ambiguous'
+    || info.hasExistingRepresentation
+    || (info.subparts?.length ?? 0) > 1
+    || ['find-error', 'correct-error'].includes(questionFamily)
+    || (questionFamily === 'round' && !structure.rounding)
+    || (questionFamily === 'draw-hands' && (info.times?.length ?? 0) !== 1)
     || (questionFamily === 'word-problem' && !structure.comparison && !structure.numberOfGroups && !structure.whole);
+  const status = info.hasExistingRepresentation
+    ? 'needs-referenced-visual'
+    : (info.subparts?.length ?? 0) > 1 || info.operations.length > 1
+      ? 'compound'
+      : needsReview ? 'ambiguous' : 'resolved';
   return {
     version: 2,
     sourceText: info.rawText ?? source,
@@ -1028,6 +1104,7 @@ export function analyseQuestion(input, overrides = {}) {
     answerProtection: protection,
     confidence,
     needsReview,
+    status,
     correctionOptions: ['domain', 'operation', 'questionFamily', 'unknownPosition', 'representationPurpose'],
     privateDerived: equation?.privateDerivedAnswer === null || equation?.privateDerivedAnswer === undefined
       ? null
@@ -1043,9 +1120,16 @@ function isFamilyContraindicated(family, interpretation) {
   const questionFamily = interpretation.questionFamily;
   const purpose = interpretation.representationPurpose;
   const source = interpretation.normalisedText;
+  const comparisonSignTask = questionFamily === 'compare'
+    && /(?:<|>|≤|≥|=)[\s\S]*\b(?:between|symbol|sign|pair)\b|\b(?:between|symbol|sign|pair)\b[\s\S]*(?:<|>|≤|≥|=)/i.test(source);
   if (questionFamily === 'find-perimeter' && ['area-model', 'area-square-grid', 'fraction-wall', 'fraction-strip'].includes(family)) return true;
   if (questionFamily === 'find-area' && ['perimeter-trace', 'comparison-bar', 'fraction-wall'].includes(family)) return true;
   if (questionFamily === 'compare' && ['part-whole', 'part-whole-number-bond'].includes(family)) return true;
+  if (comparisonSignTask && ['comparison-bar', 'comparison-bar-model', 'empty-number-line', 'empty-calculation-line'].includes(family)) return true;
+  if (questionFamily === 'calculate'
+    && interpretation.mathematicalStructure.startValue !== null
+    && interpretation.mathematicalStructure.change !== null
+    && ['comparison-bar', 'place-value-exchange', 'place-value-exchange-workspace'].includes(family)) return true;
   if (questionFamily === 'equivalent-fraction' && ['fraction-set', 'fraction-quantity-bar'].includes(family)) return true;
   if (questionFamily === 'construct-chart' && ['line-graph', 'bar-chart', 'pictogram'].includes(family) && !/\b(?:blank|construct|draw|complete)\b/i.test(source)) return true;
   if (purpose === 'support-reasoning-or-proof' && ['column-arithmetic', 'short-multiplication', 'short-division'].includes(family)) return true;
@@ -1066,11 +1150,15 @@ function rankedIdealCandidates(interpretation) {
     if (!isFamilyContraindicated(id, interpretation)) candidates.push(candidate(id, score, reason, purpose, options));
   };
 
-  if (family === 'locate-on-number-line' && structure.scale) {
+  if (family === 'calculate' && structure.startValue !== null && structure.change !== null) {
+    add('change-bar', 104, 'Shows the known starting value and exact increase or decrease, with the result left blank.');
+  } else if (family === 'locate-on-number-line' && structure.scale) {
     add('number-line', 100, 'Uses the exact endpoints and equal fraction intervals named in the question.', 'record-thinking');
-  } else if (family === 'round' && structure.rounding) {
-    add('rounding-number-line', 100, 'Shows the two neighbouring multiples and the exact midpoint.');
-    add('four-digit-number-line', 74, 'Offers a broader number-line alternative when the surrounding interval matters.');
+  } else if (family === 'round') {
+    if (structure.rounding) {
+      add('rounding-number-line', 100, 'Shows the two neighbouring multiples and the exact midpoint.');
+      add('four-digit-number-line', 74, 'Offers a broader number-line alternative when the surrounding interval matters.');
+    }
   } else if (domain === 'Number and place value') {
     if (family === 'find-error') {
       add('place-value', 101, 'Aligns the digits so the stated place-value misconception remains visible for discussion.');
@@ -1099,7 +1187,13 @@ function rankedIdealCandidates(interpretation) {
 
   if (structure.numberOfGroups !== null || domain === 'Multiplication' || domain === 'Division') {
     const division = domain === 'Division' || interpretation.equation?.operator === 'division';
-    if (division && structure.unknownPosition === 'group-size') {
+    if (division && structure.unknownPosition === 'remainder' && structure.numberOfGroups !== null) {
+      add('sharing-division', 104, 'Shows the exact equal shares and keeps the leftover quantity blank.');
+      add('division-number-line', 82, 'Offers an exact equal-jump alternative with the remainder protected.');
+    } else if (division && structure.unknownPosition === 'remainder' && structure.groupSize !== null) {
+      add('grouping-division', 104, 'Shows complete groups of the stated size and keeps the leftover quantity blank.');
+      add('division-number-line', 82, 'Offers an exact equal-jump alternative with the remainder protected.');
+    } else if (division && structure.unknownPosition === 'group-size') {
       add('sharing-division', 99, 'Represents a total shared between a known number of equal groups.');
       add('equal-groups', 82, 'Provides a compact equal-groups alternative.');
     } else if (division && structure.unknownPosition === 'group-count') {

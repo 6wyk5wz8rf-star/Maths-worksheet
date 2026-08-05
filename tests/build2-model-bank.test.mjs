@@ -37,6 +37,18 @@ test('every Build 2 default recipe validates and renders as a semantic model', (
   }
 });
 
+test('Build 2 Large and Extra large choices increase printed label scale', () => {
+  const definition = getBuild2ModelDefinition('clock-model');
+  const scales = ['standard', 'large', 'extra-large'].map((size) => {
+    const recipe = createBuild2ModelRecipe(definition.id, { size });
+    const rendered = renderBuild2Model(recipe, { outputView: 'pupil' });
+    const match = rendered.match(/--mps-model-text-scale:([\d.]+)/);
+    assert.ok(match, `${size} model needs an explicit print text scale`);
+    return Number(match[1]);
+  });
+  assert.deepEqual(scales, [1, 1.14, 1.28]);
+});
+
 test('number-line normalisation makes visual intervals exact and keeps a blank pupil target protected', () => {
   const recipe = createBuild2ModelRecipe('rounding-number-line', {
     values: { number: 3462, step: 100, showMidpoint: true },
