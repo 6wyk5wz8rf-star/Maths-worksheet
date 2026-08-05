@@ -9,6 +9,7 @@ import {
   formatPence,
   isModelContraindicated,
   parseMoneyToPence,
+  parseNumberLinePrompt,
   parseRational,
   parseSimpleEquation,
   parseTimeToMinutes,
@@ -18,6 +19,7 @@ import {
   subtractRationals,
 } from '../js/question-intelligence.js';
 import { matchQuestionToModels } from '../js/matcher.js';
+import { validateRecipe } from '../js/model-registry.js';
 
 test('rational helpers keep Year 4 fractions exact instead of using decimal arithmetic', () => {
   assert.deepEqual(parseRational('1.25'), { numerator: 5, denominator: 4 });
@@ -25,6 +27,59 @@ test('rational helpers keep Year 4 fractions exact instead of using decimal arit
   assert.deepEqual(subtractRationals('3/4', '1/6'), { numerator: 7, denominator: 12 });
   assert.equal(rationalToString(divideRationals('3/5', '9/10')), '2/3');
   assert.equal(parseRational('3/0'), null);
+});
+
+test('fraction locations are read as exact number-line tasks rather than generic word problems', () => {
+  const examples = [
+    ['Place 1 1/4 on a number line from 1 to 2 divided into quarters.', 1, 2, 4, 1.25],
+    ['Place 2 3/5 on a number line from 2 to 3 divided into fifths.', 2, 3, 5, 2.6],
+    ['Place 4 7/8 on a number line from 4 to 5 divided into eighths.', 4, 5, 8, 4.875],
+  ];
+  for (const [source, start, end, divisions, target] of examples) {
+    assert.deepEqual(parseNumberLinePrompt(source), { start, end, divisions, step: (end - start) / divisions, target });
+    const interpretation = analyseQuestion(source);
+    assert.equal(interpretation.questionFamily, 'locate-on-number-line');
+    assert.deepEqual(interpretation.mathematicalStructure.scale, { start, end, divisions, target });
+    assert.ok(interpretation.answerProtection.prohibitedAutoFill.includes('line-position'));
+    assert.equal(rankModelRecommendations(interpretation).recommendations[0].family, 'number-line');
+    const matched = matchQuestionToModels(source);
+    assert.equal(matched.provisionalRecipe?.family, 'number-line');
+  }
+});
+
+test('digit-value and error-analysis wording retain their actual task families', () => {
+  assert.equal(analyseQuestion('What is the value of the digit 4 in 3,482?').questionFamily, 'identify-place-value');
+  const source = 'A pupil places 2 1/3 before 2 on a number line. Explain the error.';
+  const error = analyseQuestion(source);
+  assert.equal(error.questionFamily, 'find-error');
+  assert.equal(error.answerProtection.preserveSourceError, true);
+  const matched = matchQuestionToModels(source);
+  assert.equal(matched.provisionalRecipe, null);
+  assert.equal(matched.noModelRecommended, true);
+  assert.match(matched.warnings[0], /preserved/i);
+});
+
+test('fraction distance questions retain their benchmark and candidates on one exact scale', () => {
+  const source = 'Which is closer to 3: 3 1/5 or 3 4/5?';
+  const interpretation = analyseQuestion(source);
+  const matched = matchQuestionToModels(source);
+  assert.equal(interpretation.questionFamily, 'compare-fractions');
+  assert.equal(matched.suggestions[0].family, 'number-line');
+  const normalized = validateRecipe(matched.provisionalRecipe);
+  assert.equal(normalized.valid, true);
+  assert.deepEqual(normalized.normalizedRecipe.values, {
+    start: 3,
+    end: 4,
+    divisions: 5,
+    interval: 0.2,
+    step: 0.2,
+    ticks: [3, 3.2, 3.4, 3.6, 3.8, 4],
+    points: [3, 3.2, 3.4, 3.6, 3.8, 4],
+    markers: [
+      { value: 3.2, label: '3 1/5' },
+      { value: 3.8, label: '3 4/5' },
+    ],
+  });
 });
 
 test('money and time helpers use exact pence and valid minute arithmetic', () => {

@@ -6,14 +6,14 @@ import {
   normalisePurpose,
   presetSettings,
   purposeToIntent,
-} from './worksheet-architecture.js?v=release-v2';
+} from './worksheet-architecture.js?v=release-v3';
 import {
   createPresetVariant,
   createVariant,
   deriveVersionOverrides,
   normaliseVersions,
   resolveWorksheetVersion,
-} from './worksheet-versions.js?v=release-v2';
+} from './worksheet-versions.js?v=release-v3';
 
 /**
  * Maths Page Studio worksheet state.
@@ -42,7 +42,7 @@ const VALID_MODEL_PURPOSES = new Set([
   'response-model',
   'worked-example',
 ]);
-const VALID_MODEL_SIZES = new Set(['compact', 'standard', 'large']);
+const VALID_MODEL_SIZES = new Set(['compact', 'standard', 'large', 'extra-large']);
 const VALID_MODEL_POSITIONS = new Set(['above', 'beside', 'beneath']);
 const VALID_BUILD2_SCAFFOLD_STATES = new Set(['blank', 'guided', 'modelled']);
 const VALID_STYLE_PRESETS = new Set(['calm', 'clear', 'compact', 'guided', 'assessment', 'homework']);

@@ -23,8 +23,8 @@ import {
   duplicateProject as duplicateStoredProject,
   worksheetActions,
   createId,
-} from './state.js?v=release-v2';
-import { paginateWorksheet, mmToPx } from './pagination.js?v=release-v2';
+} from './state.js?v=release-v3';
+import { paginateWorksheet, mmToPx } from './pagination.js?v=release-v3';
 import {
   SECTION_ROLES,
   STYLE_PRESETS,
@@ -32,9 +32,9 @@ import {
   footprintForPattern,
   suggestNewQuestionOrder,
   suggestWorksheetArchitecture,
-} from './worksheet-architecture.js?v=release-v2';
-import { compareVersions, resolveWorksheetVersion } from './worksheet-versions.js?v=release-v2';
-import { createSafeNumberVariation } from './number-variation.js?v=release-v2';
+} from './worksheet-architecture.js?v=release-v3';
+import { compareVersions, createWorkbookCutoutVariant, resolveWorksheetVersion } from './worksheet-versions.js?v=release-v3';
+import { createSafeNumberVariation } from './number-variation.js?v=release-v3';
 
 const SAMPLE_TEXT = `Place value
 
@@ -790,50 +790,52 @@ function renderAttachedModel(block, worksheet) {
     : [['blank', 'Blank'], ['partly-completed', 'Partly'], ['completed', 'Completed']];
   const validation = validateRecipe(model, { intent: worksheet.intent });
   const warnings = [...validation.warnings, ...validation.errors];
-  return `<section class="inspector-section">
+  return `<section class="inspector-section model-controls">
     <h3>${escapeHtml(definition?.name ?? 'Attached model')}</h3>
-    <div class="choice-grid three" role="group" aria-label="Model completion state">
-      ${completionChoices.map(([value, label]) => `<button type="button" class="choice-button ${scaffold === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="${build2 ? 'scaffoldState' : 'completionState'}" data-value="${value}" aria-pressed="${scaffold === value}">${label}</button>`).join('')}
+    <p class="model-size-hint">Make the mathematical model readable before changing anything else.</p>
+    <div class="choice-grid three" role="group" aria-label="Model size">
+      ${[['standard', 'Normal'], ['large', 'Large'], ['extra-large', 'Extra large']].map(([value, label]) => `<button type="button" class="choice-button ${model.size === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="size" data-value="${value}" aria-pressed="${model.size === value}">${label}</button>`).join('')}
     </div>
+    ${model.size === 'compact' ? '<p class="field-hint">This model is currently compact. Choose Normal, Large or Extra large to make it easier to read.</p>' : ''}
+    ${warnings.length ? `<div class="warning-card"><strong>${validation.valid ? 'Check this model' : 'Cannot show safely'}</strong><span>${escapeHtml(warnings[0].message)}</span></div>` : ''}
     ${worksheet.intent === 'assessment' && (model.completionState !== 'blank' || isAnswerRevealRisk(model, { intent: worksheet.intent })) ? `<div class="warning-card"><strong>Assessment check</strong><span>This model may reveal a method, relationship or answer. Keep it only if that support is intentional.</span></div>` : ''}
-    <div class="inspector-section">
-      <h3>Mathematical values</h3>
-      <div class="field-grid">${(definition?.editorFields ?? []).map((field) => renderEditorField(field, model)).join('')}</div>
-      ${warnings.length ? `<div class="warning-card"><strong>${validation.valid ? 'Check this model' : 'Cannot show safely'}</strong><span>${escapeHtml(warnings[0].message)}</span></div>` : ''}
-    </div>
-    <div class="inspector-section">
-      <h3>Purpose</h3>
-      <div class="choice-grid">
-        ${[
-          ['question-information', 'Question info'],
-          ['thinking-model', 'Thinking model'],
-          ['response-model', 'Pupil completes'],
-          ['worked-example', 'Worked example'],
-        ].map(([value, label]) => `<button type="button" class="choice-button ${model.purpose === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="purpose" data-value="${value}" aria-pressed="${model.purpose === value}">${label}</button>`).join('')}
+    <details class="inspector-disclosure">
+      <summary>Model details</summary>
+      <div class="inspector-disclosure-body">
+        <div class="field"><label>Completion</label><div class="choice-grid three" role="group" aria-label="Model completion state">
+          ${completionChoices.map(([value, label]) => `<button type="button" class="choice-button ${scaffold === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="${build2 ? 'scaffoldState' : 'completionState'}" data-value="${value}" aria-pressed="${scaffold === value}">${label}</button>`).join('')}
+        </div></div>
+        <div class="field"><label>Mathematical values</label><div class="field-grid">${(definition?.editorFields ?? []).filter((field) => !['size', 'completionState', 'scaffoldState', 'purpose', 'position'].includes(field.key)).map((field) => renderEditorField(field, model)).join('')}</div></div>
+        <div class="field"><label>Purpose</label><div class="choice-grid">
+          ${[
+            ['question-information', 'Question info'],
+            ['thinking-model', 'Thinking model'],
+            ['response-model', 'Pupil completes'],
+            ['worked-example', 'Worked example'],
+          ].map(([value, label]) => `<button type="button" class="choice-button ${model.purpose === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="purpose" data-value="${value}" aria-pressed="${model.purpose === value}">${label}</button>`).join('')}
+        </div></div>
+        <div class="field"><label>Placement</label><div class="choice-grid three">
+          ${['above', 'beside', 'beneath'].map((value) => `<button type="button" class="choice-button ${model.position === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="position" data-value="${value}" aria-pressed="${model.position === value}">${humanOption(value)}</button>`).join('')}
+        </div></div>
+        <div class="choice-grid" role="group" aria-label="Additional model size options">
+          <button type="button" class="choice-button ${model.size === 'compact' ? 'is-selected' : ''}" data-action="set-model-option" data-key="size" data-value="compact" aria-pressed="${model.size === 'compact'}">Compact</button>
+          <button type="button" class="choice-button ${model.size === 'extra-large' ? 'is-selected' : ''}" data-action="set-model-option" data-key="size" data-value="extra-large" aria-pressed="${model.size === 'extra-large'}">Extra large</button>
+        </div>
+        <div class="switch-row">
+          <span>${modelBindingMode(model) === 'bound' ? 'Linked to question' : 'Detached model'}<small class="field-hint">${modelBindingMode(model) === 'bound' ? ' Values update when the wording or reading changes.' : ' Custom values stay independent.'}</small></span>
+          <label class="switch"><input type="checkbox" aria-label="Linked to question" data-role="model-binding-toggle" ${modelBindingMode(model) === 'bound' ? 'checked' : ''}><span></span></label>
+        </div>
+        <div class="switch-row">
+          <span>Complete this model in the teacher version</span>
+          <label class="switch"><input type="checkbox" aria-label="Complete this model in the teacher version" data-role="teacher-model-toggle" ${block.teacher.completedModel ? 'checked' : ''}><span></span></label>
+        </div>
       </div>
-    </div>
-    <div class="inspector-section">
-      <h3>Placement</h3>
-      <div class="choice-grid three">
-        ${['above', 'beside', 'beneath'].map((value) => `<button type="button" class="choice-button ${model.position === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="position" data-value="${value}" aria-pressed="${model.position === value}">${humanOption(value)}</button>`).join('')}
-      </div>
-      <div class="choice-grid three" style="margin-top:6px">
-        ${['compact', 'standard', 'large'].map((value) => `<button type="button" class="choice-button ${model.size === value ? 'is-selected' : ''}" data-action="set-model-option" data-key="size" data-value="${value}" aria-pressed="${model.size === value}">${humanOption(value)}</button>`).join('')}
-      </div>
-    </div>
-    <div class="switch-row">
-      <span>${modelBindingMode(model) === 'bound' ? 'Linked to question' : 'Detached model'}<small class="field-hint">${modelBindingMode(model) === 'bound' ? ' Values update when the wording or reading changes.' : ' Custom values stay independent.'}</small></span>
-      <label class="switch"><input type="checkbox" aria-label="Linked to question" data-role="model-binding-toggle" ${modelBindingMode(model) === 'bound' ? 'checked' : ''}><span></span></label>
-    </div>
-    <div class="switch-row">
-      <span>Complete this model in the teacher version</span>
-      <label class="switch"><input type="checkbox" aria-label="Complete this model in the teacher version" data-role="teacher-model-toggle" ${block.teacher.completedModel ? 'checked' : ''}><span></span></label>
-    </div>
+    </details>
     <div class="inspector-actions">
       <button type="button" class="secondary" data-action="browse-models">Replace model</button>
       <button type="button" class="ghost" data-action="remove-model" aria-label="Remove attached model">${icon('trash')}</button>
     </div>
-    <button type="button" class="ghost full-width" data-action="apply-similar-model" style="margin-top:6px">Apply this model to similar questions</button>
+    <button type="button" class="ghost full-width" data-action="apply-similar-model" style="margin-top:6px">Apply this model to compatible questions</button>
   </section>`;
 }
 
@@ -890,15 +892,23 @@ function renderCompositionControls(block, worksheet) {
   ];
   const currentSection = block.section ?? '';
   const sections = worksheet.architecture?.sections ?? [];
-  return `<section class="inspector-section">
-    <h3>Question block</h3>
-    <div class="field"><label for="block-pattern">Structure</label><select id="block-pattern" data-role="block-pattern">${patterns.map(([value, label]) => `<option value="${value}" ${composition.pattern === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
-    <div class="field" style="margin-top:8px"><label for="manual-number">Manual number <span class="field-hint">(for example 4a)</span></label><input id="manual-number" data-role="manual-number" value="${escapeAttr(block.manualNumber ?? '')}" placeholder="Automatic"></div>
-    <div class="choice-grid three" style="margin-top:8px" role="group" aria-label="Block footprint">
-      ${[['compact', 'Compact'], ['standard', 'Standard'], ['spacious', 'Spacious'], ['half', 'Half width'], ['full', 'Full width'], ['page', 'Full page']].map(([value, label]) => `<button type="button" class="choice-button ${composition.footprint === value ? 'is-selected' : ''}" data-action="set-footprint" data-value="${value}" aria-pressed="${composition.footprint === value}">${label}</button>`).join('')}
+  return `<section class="inspector-section composition-controls">
+    <h3>Page layout</h3>
+    <div class="choice-grid" role="group" aria-label="Question layout">
+      ${[['compact', 'Compact'], ['standard', 'Standard'], ['half', 'Two columns'], ['full', 'Full width']].map(([value, label]) => `<button type="button" class="choice-button ${composition.footprint === value ? 'is-selected' : ''}" data-action="set-footprint" data-value="${value}" aria-pressed="${composition.footprint === value}">${label}</button>`).join('')}
     </div>
-    ${sections.length ? `<div class="field" style="margin-top:8px"><label for="block-section">Section</label><select id="block-section" data-role="block-section">${sections.map((section) => `<option value="${escapeAttr(section.id)}" ${currentSection === section.id ? 'selected' : ''}>${escapeHtml(section.name)}</option>`).join('')}</select></div>` : ''}
-    <div class="switch-row"><span>Keep with next block</span><label class="switch"><input type="checkbox" aria-label="Keep with next block" data-role="keep-with-next" ${composition.keepWithNext || block.layout?.keepWithNext ? 'checked' : ''}><span></span></label></div>
+    <details class="inspector-disclosure">
+      <summary>More layout options</summary>
+      <div class="inspector-disclosure-body">
+        <div class="field"><label for="block-pattern">Question type</label><select id="block-pattern" data-role="block-pattern">${patterns.map(([value, label]) => `<option value="${value}" ${composition.pattern === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+        <div class="choice-grid" role="group" aria-label="Additional question layouts">
+          ${[['spacious', 'Spacious'], ['page', 'Full page']].map(([value, label]) => `<button type="button" class="choice-button ${composition.footprint === value ? 'is-selected' : ''}" data-action="set-footprint" data-value="${value}" aria-pressed="${composition.footprint === value}">${label}</button>`).join('')}
+        </div>
+        <div class="field"><label for="manual-number">Manual number <span class="field-hint">(for example 4a)</span></label><input id="manual-number" data-role="manual-number" value="${escapeAttr(block.manualNumber ?? '')}" placeholder="Automatic"></div>
+        ${sections.length ? `<div class="field"><label for="block-section">Section</label><select id="block-section" data-role="block-section">${sections.map((section) => `<option value="${escapeAttr(section.id)}" ${currentSection === section.id ? 'selected' : ''}>${escapeHtml(section.name)}</option>`).join('')}</select></div>` : ''}
+        <div class="switch-row"><span>Keep with next block</span><label class="switch"><input type="checkbox" aria-label="Keep with next block" data-role="keep-with-next" ${composition.keepWithNext || block.layout?.keepWithNext ? 'checked' : ''}><span></span></label></div>
+      </div>
+    </details>
   </section>`;
 }
 
@@ -978,6 +988,15 @@ function selectInterpretationOptions(values, selected, labels = {}) {
   return `<option value="">Automatic</option>${available.map((value) => `<option value="${escapeAttr(value)}" ${selected === value ? 'selected' : ''}>${escapeHtml(labels[value] ?? humanOption(value))}</option>`).join('')}`;
 }
 
+function readableQuestionFamily(value) {
+  return {
+    'locate-on-number-line': 'Locate a value on a number line',
+    'identify-place-value': 'Find the value of a digit',
+    'find-error': 'Find and explain an error',
+    'correct-error': 'Correct an error',
+  }[value] ?? humanOption(value ?? 'question');
+}
+
 function renderInterpretationControls(block, worksheet) {
   const match = matchForBlock(block, worksheet);
   const interpretation = block.extracted?.interpretation ?? match.interpretation;
@@ -987,12 +1006,14 @@ function renderInterpretationControls(block, worksheet) {
   const unknownOptions = [
     'whole', 'part', 'difference', 'larger-quantity', 'smaller-quantity', 'start', 'change', 'result',
     'factor', 'group-size', 'group-count', 'numerator', 'denominator', 'rounded-value', 'converted-value',
-    'perimeter', 'area', 'hands', 'chart-data', 'comparison-symbol',
+    'perimeter', 'area', 'hands', 'chart-data', 'comparison-symbol', 'line-position',
   ];
   const reason = top?.reason ?? 'Choose a representation only where it genuinely helps.';
   return `<section class="inspector-section interpretation-panel ${interpretation?.needsReview ? 'needs-review' : ''}">
-    <h3>Question reading ${interpretation?.needsReview ? '<span class="confidence medium">Review</span>' : ''}</h3>
-    <p>This appears to be <strong>${escapeHtml(humanOption(interpretation?.questionFamily ?? 'question'))}</strong> in <strong>${escapeHtml(interpretation?.curriculumDomain ?? 'Mixed or multi-step')}</strong>. ${escapeHtml(reason)}</p>
+    <div class="reading-summary">
+      <div><small>Question reading ${interpretation?.needsReview ? '<span class="confidence medium">Check</span>' : ''}</small><strong>${escapeHtml(readableQuestionFamily(interpretation?.questionFamily))}</strong><span>${escapeHtml(interpretation?.curriculumDomain ?? 'Mixed or multi-step')} · ${escapeHtml(reason)}</span></div>
+      <button type="button" class="ghost" data-action="toggle-interpretation">${ui.editingInterpretation ? 'Done' : 'Fix reading'}</button>
+    </div>
     ${ui.editingInterpretation ? `<div class="field-grid interpretation-fields">
       <div class="field"><label for="interpret-domain">Domain</label><select id="interpret-domain" data-role="interpretation-field" data-key="domain">${selectInterpretationOptions(YEAR4_DOMAINS, overrides.domain || interpretation?.curriculumDomain)}</select></div>
       <div class="field"><label for="interpret-operation">Operation</label><select id="interpret-operation" data-role="interpretation-field" data-key="operation">${selectInterpretationOptions(['addition', 'subtraction', 'multiplication', 'division'], overrides.operation || structure.operation)}</select></div>
@@ -1000,8 +1021,7 @@ function renderInterpretationControls(block, worksheet) {
       <div class="field"><label for="interpret-unknown">Keep this unknown</label><select id="interpret-unknown" data-role="interpretation-field" data-key="unknownPosition">${selectInterpretationOptions(unknownOptions, overrides.unknownPosition || structure.unknownPosition)}</select></div>
       <div class="field full"><label for="interpret-purpose">Representation purpose</label><select id="interpret-purpose" data-role="interpretation-field" data-key="representationPurpose">${selectInterpretationOptions(REPRESENTATION_PURPOSES, overrides.representationPurpose || interpretation?.representationPurpose)}</select></div>
     </div>
-    <div class="inspector-actions"><button type="button" class="secondary" data-action="reset-interpretation">Use automatic reading</button><button type="button" class="ghost" data-action="toggle-interpretation">Done</button></div>`
-      : '<button type="button" class="ghost full-width" data-action="toggle-interpretation">Change interpretation</button>'}
+    <button type="button" class="ghost full-width" data-action="reset-interpretation" style="margin-top:8px">Use automatic reading</button>` : ''}
   </section>`;
 }
 
@@ -1025,23 +1045,25 @@ function renderInspector(worksheet) {
     ${renderCompositionControls(block, worksheet)}
     ${block.model && !ui.browseModels ? renderAttachedModel(block, worksheet) : renderModelChoices(block, worksheet)}
     ${renderResponseControls(block)}
-    <section class="inspector-section">
-      <h3>Optional support</h3>
-      <div class="field"><label for="block-hint">Brief hint</label><input id="block-hint" data-role="block-composition-text" data-key="hint" value="${escapeAttr(block.composition?.hint ?? '')}" placeholder="Only where it helps"></div>
-      <div class="field"><label for="block-stem">Sentence stem</label><input id="block-stem" data-role="block-composition-text" data-key="sentenceStem" value="${escapeAttr(block.composition?.sentenceStem ?? '')}" placeholder="I know this because…"></div>
-      <div class="field"><label for="block-vocabulary">Vocabulary cue</label><input id="block-vocabulary" data-role="block-composition-text" data-key="vocabulary" value="${escapeAttr((block.composition?.vocabulary ?? []).join(', '))}" placeholder="e.g. value, interval"></div>
-      <button type="button" class="ghost full-width" data-action="vary-numbers" style="margin-top:8px">Create a safe value variation</button>
-    </section>
-    <section class="inspector-section">
-      <h3>Teacher version</h3>
-      <div class="field-grid">
+    <details class="inspector-section inspector-disclosure">
+      <summary>Optional support</summary>
+      <div class="inspector-disclosure-body">
+        <div class="field"><label for="block-hint">Brief hint</label><input id="block-hint" data-role="block-composition-text" data-key="hint" value="${escapeAttr(block.composition?.hint ?? '')}" placeholder="Only where it helps"></div>
+        <div class="field"><label for="block-stem">Sentence stem</label><input id="block-stem" data-role="block-composition-text" data-key="sentenceStem" value="${escapeAttr(block.composition?.sentenceStem ?? '')}" placeholder="I know this because…"></div>
+        <div class="field"><label for="block-vocabulary">Vocabulary cue</label><input id="block-vocabulary" data-role="block-composition-text" data-key="vocabulary" value="${escapeAttr((block.composition?.vocabulary ?? []).join(', '))}" placeholder="e.g. value, interval"></div>
+        <button type="button" class="ghost full-width" data-action="vary-numbers">Create a safe value variation</button>
+      </div>
+    </details>
+    <details class="inspector-section inspector-disclosure">
+      <summary>Teacher version</summary>
+      <div class="inspector-disclosure-body field-grid">
         <div class="field full"><label for="teacher-answer">Answer (only if known)</label><input id="teacher-answer" data-role="teacher-answer" value="${escapeAttr(block.teacher.answer ?? '')}" placeholder="Leave unresolved if uncertain"></div>
         <div class="field full"><label for="teacher-method">Expected method</label><input id="teacher-method" data-role="teacher-field" data-key="expectedMethod" value="${escapeAttr(block.teacher.expectedMethod ?? '')}" placeholder="Optional"></div>
         <div class="field full"><label for="teacher-misconception">Common misconception</label><input id="teacher-misconception" data-role="teacher-field" data-key="misconception" value="${escapeAttr(block.teacher.misconception ?? '')}" placeholder="Optional"></div>
         <div class="field full"><label for="teacher-notes">Short note</label><textarea id="teacher-notes" data-role="teacher-notes" placeholder="Optional teaching note">${escapeHtml(block.teacher.notes ?? '')}</textarea></div>
         <div class="field full"><label for="teacher-marking">Marking note</label><textarea id="teacher-marking" data-role="teacher-field" data-key="markingNote" placeholder="Optional">${escapeHtml(block.teacher.markingNote ?? '')}</textarea></div>
       </div>
-    </section>
+    </details>
     ${activeOverride ? `<button type="button" class="ghost full-width" data-action="reset-version-block" data-id="${block.id}">Reset this question to Standard</button>` : ''}
     ${renderBlockOrderControls(block, worksheet)}
   </div>`;
@@ -1050,8 +1072,9 @@ function renderInspector(worksheet) {
 function renderBlockOrderControls(block, worksheet) {
   const index = worksheet.blocks.findIndex((item) => item.id === block.id);
   const breakSet = new Set(worksheet.pageArrangement.manualBreakBefore);
-  return `<section class="inspector-section">
-    <h3>Block position</h3>
+  return `<details class="inspector-section inspector-disclosure">
+    <summary>Position and page breaks</summary>
+    <div class="inspector-disclosure-body">
     <div class="choice-grid">
       <button type="button" class="choice-button" data-action="move-block" data-id="${block.id}" data-direction="up" ${index === 0 ? 'disabled' : ''}>↑ Move up</button>
       <button type="button" class="choice-button" data-action="move-block" data-id="${block.id}" data-direction="down" ${index === worksheet.blocks.length - 1 ? 'disabled' : ''}>↓ Move down</button>
@@ -1059,7 +1082,8 @@ function renderBlockOrderControls(block, worksheet) {
       <button type="button" class="choice-button" data-action="move-page" data-id="${block.id}" data-direction="next">Next page</button>
     </div>
     <div class="switch-row"><span>Start on a new page</span><label class="switch"><input type="checkbox" aria-label="Start this block on a new page" data-role="manual-break" ${breakSet.has(block.id) ? 'checked' : ''}><span></span></label></div>
-  </section>`;
+    </div>
+  </details>`;
 }
 
 function renderNavigator(worksheet, mobile = false) {
@@ -1254,16 +1278,18 @@ function renderMake() {
       </div>
       <div class="toolbar-group">
         <button type="button" class="version-chip" data-action="open-versions" aria-label="Open worksheet versions"><span>${escapeHtml(worksheet.activeVersion?.name ?? 'Standard')}</span><small>${worksheet.activeVersionId === 'master' ? 'Master' : 'Version'}</small></button>
-        <span class="toolbar-divider"></span>
-        <div class="view-toggle" role="group" aria-label="Output view">
-          <button type="button" data-action="set-output-view" data-value="pupil" class="${worksheet.outputView === 'pupil' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'pupil'}">Pupil</button>
-          <button type="button" data-action="set-output-view" data-value="teacher" class="${worksheet.outputView === 'teacher' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'teacher'}">Teacher</button>
-          <button type="button" data-action="set-output-view" data-value="answer" class="${worksheet.outputView === 'answer' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'answer'}">Answers</button>
-        </div>
-        <span class="toolbar-divider"></span>
+        <button type="button" class="toolbar-text-button" data-action="open-navigator" aria-controls="mobile-question-navigator" aria-expanded="${ui.navigatorOpen}">Questions <span>${worksheet.blocks.filter((block) => block.kind === 'question').length}</span></button>
+        <button type="button" class="toolbar-text-button workbook-button" data-action="create-workbook-version">Workbook sheet</button>
+        <span class="panel-count">${pagination.pageCount} ${pagination.pageCount === 1 ? 'page' : 'pages'}</span>
         <details class="batch-menu">
-          <summary>Batch</summary>
+          <summary>More</summary>
           <div class="batch-menu-panel">
+            <div class="view-toggle" role="group" aria-label="Output view">
+              <button type="button" data-action="set-output-view" data-value="pupil" class="${worksheet.outputView === 'pupil' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'pupil'}">Pupil</button>
+              <button type="button" data-action="set-output-view" data-value="teacher" class="${worksheet.outputView === 'teacher' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'teacher'}">Teacher</button>
+              <button type="button" data-action="set-output-view" data-value="answer" class="${worksheet.outputView === 'answer' ? 'is-selected' : ''}" aria-pressed="${worksheet.outputView === 'answer'}">Answers</button>
+            </div>
+            <button type="button" data-action="open-settings">Page settings</button>
             <button type="button" data-action="attach-best-models">Attach best-fit models</button>
             <button type="button" data-action="remove-all-models">Remove all models</button>
             <button type="button" data-action="set-all-blank">Set all to Blank</button>
@@ -1273,14 +1299,9 @@ function renderMake() {
             <button type="button" class="batch-warning" data-action="replace-all-recommendations">Replace my choices</button>
           </div>
         </details>
-        <span class="toolbar-divider"></span>
-        <button type="button" class="icon-button" data-action="open-settings" aria-label="Open page settings">${icon('settings')}<span class="settings-label">Page settings</span></button>
-        <span class="toolbar-divider"></span>
-        <span class="panel-count">${pagination.pageCount} ${pagination.pageCount === 1 ? 'page' : 'pages'}</span>
       </div>
     </div>
     <div class="make-layout">
-      ${renderNavigator(worksheet)}
       <div class="workspace-scroll" aria-label="A4 worksheet preview">
         ${renderPageStack(worksheet, worksheet.outputView, 'editor', pagination)}
       </div>
@@ -1461,6 +1482,7 @@ function renderVersionsContent() {
       ['teacher-model', 'Create teacher model'],
       ['answer', 'Create answer version'],
     ].map(([type, label]) => `<button type="button" class="secondary" data-action="create-version" data-type="${type}">${label}</button>`).join('')}
+    <button type="button" class="secondary" data-action="create-workbook-version">Create one-page workbook sheet</button>
   </div>
   <div class="version-list" aria-label="Worksheet versions">
     ${versions.map((version) => `<article class="version-row ${version.id === activeId ? 'is-active' : ''}">
@@ -1476,6 +1498,35 @@ function renderVersionsContent() {
     ${comparison.length ? `<div class="version-difference-list">${comparison.map((item) => `<div><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.differences.join(' · '))}</span></div>`).join('')}</div>` : '<p class="version-quiet">No differences to show against this version.</p>'}
   </section>` : '<p class="version-quiet">Create a version only when it gives pupils a genuinely different route into the same mathematics.</p>'}`;
   restoreInteraction(content, interaction);
+}
+
+function createWorkbookCutoutVersion() {
+  const master = masterWorksheet();
+  const existing = (master.versions?.items ?? []).find((version) => version.name === 'Workbook cut-outs');
+  if (existing) {
+    dispatchMaster(worksheetActions.setActiveVersion(existing.id));
+    ui.comparisonVersionId = 'master';
+    if (versionsDialog.open) renderVersionsContent();
+    toast('Opened the existing Workbook cut-outs sheet.');
+    return;
+  }
+  const version = createWorkbookCutoutVariant(master);
+  dispatchMaster(worksheetActions.createVersion({
+    type: 'custom',
+    name: version.name,
+    outputView: 'pupil',
+    preset: false,
+    overrides: version.overrides,
+  }));
+  ui.comparisonVersionId = 'master';
+  const workbook = store.getState();
+  const pagination = paginateWorksheet(workbook, { outputView: 'pupil' });
+  if (versionsDialog.open) renderVersionsContent();
+  if (pagination.pageCount === 1 && !pagination.hasOverflow && !pagination.tooSmallModelBlockIds.length) {
+    toast('Workbook cut-outs made as one readable A4 page.');
+  } else {
+    toast(`Workbook cut-outs needs ${pagination.pageCount} pages at a readable size. Nothing has been shrunk.`, 'warning');
+  }
 }
 
 function renderProjectList() {
@@ -2310,6 +2361,9 @@ document.addEventListener('click', async (event) => {
     dispatchMaster(worksheetActions.createVersion({ type: button.dataset.type }));
     ui.comparisonVersionId = 'master';
     renderVersionsContent();
+    render();
+  } else if (action === 'create-workbook-version') {
+    createWorkbookCutoutVersion();
     render();
   } else if (action === 'set-active-version') {
     dispatchMaster(worksheetActions.setActiveVersion(button.dataset.id));

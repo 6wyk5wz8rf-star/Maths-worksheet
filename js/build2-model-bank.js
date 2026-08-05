@@ -14,7 +14,7 @@ export const BUILD1_FAMILY_REFERENCES = Object.freeze([
 ]);
 
 export const BUILD2_SCAFFOLD_STATES = Object.freeze(['blank', 'guided', 'modelled']);
-export const BUILD2_PRINT_SIZES = Object.freeze(['compact', 'standard', 'large']);
+export const BUILD2_PRINT_SIZES = Object.freeze(['compact', 'standard', 'large', 'extra-large']);
 // The groups renderer draws every complete group and every item in that
 // group. Keep these limits beside validation and import them in the renderer
 // so a recipe can never be accepted at one capacity and silently truncated at

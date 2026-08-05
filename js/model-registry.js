@@ -19,7 +19,7 @@ export const MODEL_PURPOSES = Object.freeze([
   "response-model",
   "worked-example",
 ]);
-export const MODEL_SIZES = Object.freeze(["compact", "standard", "large"]);
+export const MODEL_SIZES = Object.freeze(["compact", "standard", "large", "extra-large"]);
 export const MODEL_POSITIONS = Object.freeze(["above", "beside", "beneath"]);
 
 export const MODEL_IDS = Object.freeze({

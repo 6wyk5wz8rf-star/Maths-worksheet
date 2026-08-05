@@ -82,10 +82,10 @@ test("every family creates a valid structured recipe and semantic SVG", () => {
   }
 });
 
-test("all three completion states and all three sizes render for every family", () => {
+test("all three completion states and all four sizes render for every family", () => {
   for (const family of familyIds) {
     for (const completionState of COMPLETION_STATES) {
-      for (const size of ["compact", "standard", "large"]) {
+      for (const size of ["compact", "standard", "large", "extra-large"]) {
         const html = renderModel(createModelRecipe(family, { completionState, size }));
         assert.match(html, new RegExp(`data-completion-state="${completionState}"`));
         assert.match(html, new RegExp(`data-model-size="${size}"`));

@@ -491,6 +491,103 @@ export function createPresetVariant(master, type, options = {}) {
   return version;
 }
 
+function workbookUsesAttachedModelAsResponse(block) {
+  if (block.model?.purpose === 'response-model') return true;
+  return /\b(?:mark|place|plot|shade|draw|label|complete)\b/i.test(String(block.displayText ?? ''));
+}
+
+function compactWorkbookResponse(response = {}, modelIsResponse = false) {
+  if (modelIsResponse) return { ...response, type: 'none', size: 'compact', customRows: 0, rows: 0, lines: 0 };
+  const extended = new Set(['writing-lines', 'lined-explanation', 'unlined-thinking', 'two-methods', 'prove-it', 'table-completion', 'diagram-construction', 'labelled-steps', 'rough-working', 'squared-working', 'calculation-area', 'open-box']);
+  // A one-page sheet is never allowed to turn a reasoning task into a tiny
+  // answer line. Keep its required working type and let pagination honestly
+  // report that it needs another page if the writing space remains essential.
+  if (extended.has(response.type)) return { ...response, size: 'compact' };
+  return { ...response, type: 'short-answer', size: 'compact', customRows: 0, rows: 0, lines: 0 };
+}
+
+/**
+ * Create a linked, pupil-only compact worksheet version for trimming or
+ * pasting into a workbook. It deliberately changes density and response
+ * duplication, never the source questions or their mathematics. Callers must
+ * paginate the result and tell the teacher when the selected material still
+ * needs more than one readable page.
+ */
+export function createWorkbookCutoutVariant(master, options = {}) {
+  const base = resolveWorksheetVersion({
+    ...master,
+    versions: { activeId: 'master', items: [createMasterVersion(master)] },
+  }, 'master');
+  const target = cloneValue(base);
+  target.settings = {
+    ...target.settings,
+    columns: 2,
+    density: 'compact',
+    bodyScale: 'small',
+    marginMm: 8,
+    margins: { top: 8, right: 8, bottom: 8, left: 8 },
+    stylePreset: 'compact',
+    sectionStyle: 'plain',
+    showNameField: false,
+    showDateField: false,
+    showClassField: false,
+    pageNumbers: false,
+    showMarks: false,
+  };
+  target.architecture = {
+    ...target.architecture,
+    compositionMode: 'rows',
+    header: {
+      ...(target.architecture?.header ?? {}),
+      layout: 'compact',
+      fields: {
+        ...(target.architecture?.header?.fields ?? {}),
+        topic: false,
+        learningIntention: false,
+        successCriteria: false,
+        shortInstruction: false,
+        teacher: false,
+      },
+    },
+    footer: { ...(target.architecture?.footer ?? {}), fields: [] },
+  };
+  target.pageArrangement = { ...target.pageArrangement, manualBreakBefore: [] };
+  target.outputView = 'pupil';
+  target.blocks = target.blocks.map((block) => {
+    if (block.kind !== 'question') {
+      return {
+        ...block,
+        composition: { ...(block.composition ?? {}), footprint: 'compact', keepWithNext: true },
+        layout: { ...(block.layout ?? {}), columnSpan: 'full', keepWithNext: true, manualBreakBefore: false, pageHint: 0 },
+      };
+    }
+    const modelIsResponse = workbookUsesAttachedModelAsResponse(block);
+    return {
+      ...block,
+      model: block.model ? { ...block.model, size: 'standard', position: 'beneath' } : null,
+      response: compactWorkbookResponse(block.response, modelIsResponse),
+      composition: {
+        ...(block.composition ?? {}),
+        pattern: 'compact-question',
+        footprint: 'half',
+        keepWithNext: false,
+        hint: '',
+        sentenceStem: '',
+        vocabulary: [],
+      },
+      layout: { ...(block.layout ?? {}), columnSpan: 'half', keepWithNext: false, manualBreakBefore: false, pageHint: 0 },
+    };
+  });
+  const version = createVariant({}, {
+    ...options,
+    type: 'custom',
+    name: options.name ?? 'Workbook cut-outs',
+    outputView: 'pupil',
+  });
+  version.overrides = deriveVersionOverrides(master, target);
+  return version;
+}
+
 export function compareVersions(master, firstId, secondId) {
   const first = resolveWorksheetVersion(master, firstId);
   const second = resolveWorksheetVersion(master, secondId);

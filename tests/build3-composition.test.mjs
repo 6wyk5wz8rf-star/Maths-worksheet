@@ -13,7 +13,7 @@ import {
 } from '../js/state.js';
 import { paginateWorksheet } from '../js/pagination.js';
 import { suggestWorksheetArchitecture } from '../js/worksheet-architecture.js';
-import { compareVersions, resolveWorksheetVersion } from '../js/worksheet-versions.js';
+import { compareVersions, createWorkbookCutoutVariant, resolveWorksheetVersion } from '../js/worksheet-versions.js';
 
 const NOW = '2026-08-04T12:00:00.000Z';
 const later = (minute) => `2026-08-04T12:${String(minute).padStart(2, '0')}:00.000Z`;
@@ -328,6 +328,38 @@ test('block footprints change printable height and a safe full-page block owns e
   assert.deepEqual(page.items.map((item) => item.blockId), ['full-page']);
   assert.equal(placement.heightMm, Math.round((page.bodyBottomMm - placement.yMm) * 100) / 100);
   assert.equal(result.hasOverflow, false);
+});
+
+test('workbook cut-outs creates one linked A4 sheet for compact response-model questions without duplicate answer spaces', () => {
+  const locations = Array.from({ length: 10 }, (_, index) => {
+    const start = index % 5;
+    const end = start + 1;
+    return question(`location-${index}`, `Place ${start} 1/2 on a number line from ${start} to ${end}.`, {
+      model: createModelRecipe('number-line', {
+        values: { start, end, divisions: 2, markers: [{ value: start + 0.5, label: `${start + 0.5}` }] },
+        unknown: 'marker:0',
+        purpose: 'response-model',
+        completionState: 'partly-completed',
+      }),
+      response: { type: 'answer-box', size: 'standard' },
+    });
+  });
+  const master = worksheet(locations);
+  const workbook = createWorkbookCutoutVariant(master, { id: 'workbook' });
+  const resolved = resolveWorksheetVersion({
+    ...master,
+    versions: { activeId: 'workbook', items: [workbook] },
+  }, 'workbook');
+  const result = paginateWorksheet(resolved, { outputView: 'pupil' });
+
+  assert.equal(resolved.settings.columns, 2);
+  assert.equal(resolved.settings.density, 'compact');
+  assert.equal(resolved.architecture.header.layout, 'compact');
+  assert.ok(resolved.blocks.every((block) => block.model?.size === 'standard'));
+  assert.ok(resolved.blocks.every((block) => block.response.type === 'none'));
+  assert.equal(result.pageCount, 1);
+  assert.equal(result.hasOverflow, false);
+  assert.deepEqual(result.blocksWithoutResponseSpace, []);
 });
 
 test('fourteen-row table and labelled-step spaces reserve every fixed-height print row', () => {

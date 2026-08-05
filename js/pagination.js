@@ -40,7 +40,7 @@ export const PAGINATION_DEFAULTS = Object.freeze({
   overcrowdingThreshold: 0.97,
 });
 
-const SIZE_SCALE = Object.freeze({ compact: 0.82, standard: 1, large: 1.28 });
+const SIZE_SCALE = Object.freeze({ compact: 0.82, standard: 1, large: 1.45, 'extra-large': 1.72 });
 const DENSITY_SCALE = Object.freeze({ compact: 0.82, standard: 1, spacious: 1.2 });
 
 // Heights are deliberately conservative: they include labels and safe SVG air.

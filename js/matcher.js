@@ -1,5 +1,5 @@
 import { extractMathInfo } from './parser.js';
-import { analyseQuestion, rankModelRecommendations } from './question-intelligence.js';
+import { analyseQuestion, parseNumberLinePrompt, rankModelRecommendations } from './question-intelligence.js';
 import { createModelRecipe as createRegisteredRecipe, getModelDefinition, listModelDefinitions } from './model-registry.js';
 
 /** Slugs are stable recipe identifiers shared by matching and rendering. */
@@ -196,10 +196,21 @@ function mergeIntelligentCandidates(candidates, interpretation) {
     limit: 8,
   });
   const merged = candidates.map((candidate) => ({ ...candidate }));
+  // The newer fraction-line renderer represents a legacy 0-to-whole scale.
+  // For mixed-number location and benchmark-distance tasks, use the mature
+  // editable number-line renderer until that renderer can express arbitrary
+  // endpoints without rounding a mixed number into a numerator. This is a
+  // deliberate truthful fallback, not a visual downgrade: it preserves the
+  // exact scale and uses the wide print frame.
+  const needsExactFractionScale = interpretation.questionFamily === 'locate-on-number-line'
+    || (interpretation.questionFamily === 'compare-fractions' && /\bcloser\s+to\b/i.test(interpretation.normalisedText));
   for (const recommendation of ranked.recommendations) {
-    const existing = merged.find((candidate) => candidate.family === recommendation.family);
+    const family = needsExactFractionScale && recommendation.family === 'fraction-number-line'
+      ? 'number-line'
+      : recommendation.family;
+    const existing = merged.find((candidate) => candidate.family === family);
     const candidate = familyCandidate(
-      recommendation.family,
+      family,
       recommendation.score,
       recommendation.reason,
       false,
@@ -238,7 +249,7 @@ function compatibilityFor(family, info) {
         ? { compatible: true }
         : { compatible: false, reason: 'A whole number is needed for a place-value partition.' };
     case 'number-line':
-      return values.length
+      return values.length || (info.fractions?.length ?? 0) || parseNumberLinePrompt(info.analysedText)
         ? { compatible: true }
         : { compatible: false, reason: 'No reliable values were found for the number line.' };
     case 'part-whole':
@@ -294,11 +305,92 @@ function safeRound(value, places = 10) {
   return Number(value.toFixed(Math.min(places, 10)));
 }
 
+function greatestCommonDivisor(left, right) {
+  let a = Math.abs(Math.trunc(left));
+  let b = Math.abs(Math.trunc(right));
+  while (b) [a, b] = [b, a % b];
+  return a || 1;
+}
+
+function leastCommonMultiple(left, right) {
+  return Math.abs(left * right) / greatestCommonDivisor(left, right);
+}
+
+function sourceLabelForFraction(info, value) {
+  const exact = (info.fractions ?? []).find((fraction) => Math.abs(Number(fraction.value) - value) < 1e-10);
+  return exact?.raw ?? String(value);
+}
+
 function numberLineValues(info) {
-  const values = [...new Set(info.numericValues)].sort((a, b) => a - b);
+  const directed = parseNumberLinePrompt(info.analysedText);
+  if (directed) {
+    const places = Math.max(decimalPlaces(directed.start), decimalPlaces(directed.end), decimalPlaces(directed.step)) + 2;
+    return {
+      start: directed.start,
+      end: directed.end,
+      divisions: directed.divisions,
+      step: safeRound(directed.step, places),
+      ticks: Array.from({ length: directed.divisions + 1 }, (_, index) => safeRound(directed.start + (directed.step * index), places)),
+      points: [],
+      markers: directed.target == null ? [] : [{ value: directed.target, label: sourceLabelForFraction(info, directed.target) }],
+    };
+  }
+  const fractionValues = (info.fractions ?? []).map((fraction) => Number(fraction.value)).filter(Number.isFinite);
+  const values = [...new Set([...(info.numericValues ?? []), ...fractionValues])].sort((a, b) => a - b);
   if (!values.length) return null;
   let start;
   let end;
+
+  // A “closer to” task compares each supplied fraction with a benchmark.
+  // Keep that benchmark and both candidates on one exact scale instead of
+  // letting a generic fraction strip discard their whole-number position.
+  const closerTo = info.analysedText.match(/\bcloser\s+to\s+([−-]?[\d,]+(?:\.\d+)?)/i);
+  const benchmark = closerTo ? Number(closerTo[1].replace(',', '').replace('−', '-')) : null;
+  if (Number.isFinite(benchmark) && fractionValues.length >= 2) {
+    start = Math.floor(Math.min(benchmark, ...fractionValues));
+    end = Math.ceil(Math.max(benchmark, ...fractionValues));
+    if (end <= start) end = start + 1;
+    const denominator = (info.fractions ?? [])
+      .map((fraction) => Math.abs(Number(fraction.denominator)))
+      .filter((value) => Number.isInteger(value) && value > 0)
+      .reduce((multiple, value) => leastCommonMultiple(multiple, value), 1);
+    const requestedDivisions = (end - start) * denominator;
+    if (Number.isInteger(requestedDivisions) && requestedDivisions > 0 && requestedDivisions <= 20) {
+      const step = (end - start) / requestedDivisions;
+      return {
+        start,
+        end,
+        divisions: requestedDivisions,
+        step,
+        ticks: Array.from({ length: requestedDivisions + 1 }, (_, index) => safeRound(start + (step * index), 8)),
+        points: [],
+        markers: (info.fractions ?? []).map((fraction) => ({ value: Number(fraction.value), label: fraction.raw ?? String(fraction.value) })),
+      };
+    }
+  }
+
+  if (/\b(?:order|arrange)\b.*\bnumber\s+line\b/i.test(info.analysedText) && fractionValues.length >= 2) {
+    start = Math.floor(Math.min(...fractionValues));
+    end = Math.ceil(Math.max(...fractionValues));
+    if (end <= start) end = start + 1;
+    const denominator = (info.fractions ?? [])
+      .map((fraction) => Math.abs(Number(fraction.denominator)))
+      .filter((value) => Number.isInteger(value) && value > 0)
+      .reduce((multiple, value) => leastCommonMultiple(multiple, value), 1);
+    const requestedDivisions = (end - start) * denominator;
+    if (Number.isInteger(requestedDivisions) && requestedDivisions > 0 && requestedDivisions <= 20) {
+      const step = (end - start) / requestedDivisions;
+      return {
+        start,
+        end,
+        divisions: requestedDivisions,
+        step,
+        ticks: Array.from({ length: requestedDivisions + 1 }, (_, index) => safeRound(start + (step * index), 8)),
+        points: [],
+        markers: [],
+      };
+    }
+  }
 
   if (values.length >= 2 && values[0] !== values[values.length - 1]) {
     start = values[0];
@@ -342,7 +434,8 @@ function inferPurpose(info, intent) {
     .replace(/\[\s*\d+\s*(?:marks?|m)\s*\]/gi, ' ')
     .replace(/\(\s*\d+\s*(?:marks?|m)\s*\)/gi, ' ')
     .replace(/\b\d+\s+marks?\s*$/gi, ' ');
-  if (/\b(?:complete|draw|mark|place|shade|label|use)\b/i.test(taskText)) return 'response-model';
+  if (/\b(?:complete|draw|mark|place|shade|label|use)\b/i.test(taskText)
+    || /\b(?:order|arrange)\b.*\bnumber\s+line\b/i.test(taskText)) return 'response-model';
   if (intent === 'assessment') return 'response-model';
   return 'thinking-model';
 }
@@ -697,6 +790,7 @@ export function createModelRecipe(family, infoOrText, options = {}) {
       if (!line) return null;
       variant = /\bround/i.test(info.analysedText) ? 'rounding' : 'marked-or-empty';
       recipeValues = line;
+      if (line.markers?.length && purpose === 'response-model') unknown = 'marker:0';
       break;
     }
     case 'part-whole': {
@@ -853,6 +947,19 @@ export function matchQuestionToModels(questionOrInfo, options = {}) {
     .map((candidate) => ({ ...candidate, ...compatibilityFor(candidate.family, info) }))
     .filter((candidate) => candidate.compatible)
     .sort((a, b) => b.score - a.score || a.family.localeCompare(b.family));
+
+  // “A pupil placed…” fraction-line errors need the pupil's misconception,
+  // not a clean substitute scale. Until a teacher deliberately chooses a
+  // representation that records that incorrect placement, retain the source
+  // and give the explanation space instead of silently attaching a generic
+  // number line that has lost the error.
+  const preserveFractionLineError = interpretation.questionFamily === 'find-error'
+    && interpretation.curriculumDomain === 'Fractions'
+    && /\b(?:pupil|child|student)\b[\s\S]*\b(?:place[sd]?|mark(?:s|ed)?)\b[\s\S]*\bnumber\s+line\b/i.test(info.analysedText);
+  if (preserveFractionLineError) {
+    candidates = [];
+    warnings.push('The pupil’s fraction-number-line error has been preserved; choose a model only if it can show that exact misconception.');
+  }
 
   if (info.likelyDomain && ['geometry', 'statistics', 'time'].includes(info.likelyDomain)) {
     // Named models are still allowed, but weak incidental matches should not

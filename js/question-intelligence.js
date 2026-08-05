@@ -75,12 +75,15 @@ export const QUESTION_FAMILIES = Object.freeze([
   'find-area',
   'identify-property',
   'read-scale',
+  'locate-on-number-line',
+  'identify-place-value',
   'plot-coordinates',
   'draw-hands',
 ]);
 
 const NUMBER_SOURCE = '[−-]?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?';
 const EQUATION_TOKEN_SOURCE = `(?:${NUMBER_SOURCE}|\\?)`;
+const RATIONAL_TOKEN_SOURCE = `(?:${NUMBER_SOURCE}\\s+\\d+\\s*\\/\\s*\\d+|[−-]?\\d+\\s*\\/\\s*\\d+|${NUMBER_SOURCE})`;
 
 const NUMBER_WORDS = Object.freeze({
   zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5,
@@ -256,6 +259,70 @@ export function parseRational(value) {
   const fraction = text.match(/^([−-]?\d+)\/([−-]?\d+)$/);
   if (fraction) return normaliseRational(Number(fraction[1].replace('−', '-')), Number(fraction[2].replace('−', '-')));
   return decimalAsRational(text);
+}
+
+function rationalTokenValue(value) {
+  const text = String(value ?? '').trim().replace(/\s+/g, ' ');
+  const mixed = text.match(/^([−-]?\d+)\s+(\d+)\s*\/\s*(\d+)$/);
+  if (mixed) {
+    const whole = Number(mixed[1].replace('−', '-'));
+    const numerator = Number(mixed[2]);
+    const denominator = Number(mixed[3]);
+    if (!Number.isInteger(whole) || !Number.isInteger(numerator) || !Number.isInteger(denominator) || denominator <= 0) return null;
+    return {
+      value: whole + ((whole < 0 ? -1 : 1) * (numerator / denominator)),
+      denominator,
+      isFraction: true,
+    };
+  }
+  const fraction = text.match(/^([−-]?\d+)\s*\/\s*(\d+)$/);
+  if (fraction) {
+    const numerator = Number(fraction[1].replace('−', '-'));
+    const denominator = Number(fraction[2]);
+    if (!Number.isInteger(numerator) || !Number.isInteger(denominator) || denominator <= 0) return null;
+    return { value: numerator / denominator, denominator, isFraction: true };
+  }
+  const number = cleanNumber(text);
+  return Number.isFinite(number) ? { value: number, denominator: null, isFraction: false } : null;
+}
+
+/**
+ * Parse a supplied number-line scale without relying on the generic number
+ * token list.  The parser retains source wording, but a line needs the exact
+ * endpoints, equal subdivisions and (where relevant) pupil target.
+ */
+export function parseNumberLinePrompt(input) {
+  const source = String(input ?? '');
+  const range = source.match(new RegExp(`\\b(?:from|between)\\s+(${NUMBER_SOURCE})(?:\\s*(?:km|m|cm|mm|l|ml|kg|g))?\\s+(?:to|and)\\s+(${NUMBER_SOURCE})`, 'i'));
+  if (!range) return null;
+  const start = cleanNumber(range[1]);
+  const end = cleanNumber(range[2]);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+
+  const directTarget = source.match(new RegExp(`\\b(?:place|mark|locate|plot)\\s+(${RATIONAL_TOKEN_SOURCE})(?=\\s+(?:on|along)\\s+(?:an?\\s+)?number\\s+line\\b)`, 'i'));
+  const tokenPattern = new RegExp(RATIONAL_TOKEN_SOURCE, 'gi');
+  const fractionTargets = [...source.matchAll(tokenPattern)]
+    .map((match) => rationalTokenValue(match[0]))
+    .filter((value) => value?.isFraction && value.value >= start && value.value <= end);
+  const targetInfo = rationalTokenValue(directTarget?.[1])
+    ?? fractionTargets[0]
+    ?? null;
+  const target = targetInfo && targetInfo.value >= start && targetInfo.value <= end ? targetInfo.value : null;
+
+  const namedParts = source.match(/\b(?:divided|split)\s+into\s+(?:equal\s+)?(halves|thirds|quarters|fourths|fifths|sixths|sevenths|eighths|ninths|tenths)\b/i);
+  const numericParts = source.match(/\b(?:divided|split)\s+into\s+(\d+)\s+(?:equal\s+)?(?:parts?|sections?)\b/i);
+  const requestedParts = namedParts ? FRACTION_WORDS[namedParts[1].toLowerCase()] : cleanNumber(numericParts?.[1]);
+  const fallbackDivisions = targetInfo?.denominator && Number.isInteger((end - start) * targetInfo.denominator)
+    ? (end - start) * targetInfo.denominator
+    : null;
+  const divisions = Number.isInteger(requestedParts) && requestedParts > 0
+    ? requestedParts
+    : Number.isInteger(fallbackDivisions) && fallbackDivisions > 0
+      ? fallbackDivisions
+      : null;
+  if (!Number.isInteger(divisions) || divisions < 1 || divisions > 20) return null;
+  const step = (end - start) / divisions;
+  return { start, end, divisions, step, target };
 }
 
 export function rationalToNumber(value) {
@@ -567,7 +634,7 @@ function detectDomains(info, source, equation = null) {
 function inferQuestionFamily(source, info, equation) {
   const lower = source.toLowerCase();
   const includes = (pattern) => pattern.test(lower);
-  if (includes(/\b(?:find|spot|identify)\s+(?:the )?(?:mistake|error)\b/) || includes(/\b(?:says|thinks)\b.*\b(?:because|but)\b/)) return 'find-error';
+  if (includes(/\b(?:find|spot|identify|explain)\s+(?:the )?(?:mistake|error)\b/) || includes(/\b(?:says|thinks)\b.*\b(?:because|but)\b/)) return 'find-error';
   if (includes(/\bcorrect (?:the )?(?:mistake|error)\b/)) return 'correct-error';
   if (includes(/\b(?:prove|convince)\b/)) return 'prove';
   if (includes(/\b(?:justify|explain why|explain how)\b/)) return 'justify';
@@ -579,10 +646,18 @@ function inferQuestionFamily(source, info, equation) {
   if (includes(/\b(?:duration|how long|elapsed time)\b/)) return 'calculate-duration';
   if (includes(/\b(?:convert|conversion)\b/)) return 'convert-measure';
   if (includes(/\b(?:equivalent)\b.*\b(?:fraction|fractions)\b/)) return 'equivalent-fraction';
+  // “Which is closer to 3?” is a comparison of fractional distance, even
+  // where the teacher does not repeat the word “fraction” in the sentence.
+  // Keeping this ahead of generic comparison means the reading and the model
+  // recommendation agree on the actual mathematical task.
+  if (includes(/\bcloser\s+to\b/) && (info.fractions?.length >= 2 || /\b(?:half|third|quarter|fifth|sixth|seventh|eighth|ninth|tenth)s?\b/.test(lower))) return 'compare-fractions';
   if (includes(/\b(?:compare|greater|less)\b.*\b(?:fraction|fractions)\b/)) return 'compare-fractions';
   if (includes(/\b(?:find|shade)\b.*\b(?:fraction|half|third|quarter|fifth|sixth|seventh|eighth|ninth|tenth)\b/)) return 'find-fraction';
   if (includes(/\b(?:round|nearest)\b/)) return 'round';
   if (includes(/\b(?:draw|show)\b.*\b(?:hands?|clock)\b/)) return 'draw-hands';
+  if (includes(/\b(?:place|mark|locate|plot)\b.*\b(?:on|along)\s+(?:a\s+)?number\s+line\b/)
+    || includes(/\b(?:mark|place|locate)\s+where\s+it\s+belongs\s+between\b/)) return 'locate-on-number-line';
+  if (includes(/\b(?:what is|find)\s+the\s+value\s+of\s+(?:the\s+)?(?:digit\s*)?\d/)) return 'identify-place-value';
   if (includes(/\b(?:order|arrange)\b/)) return 'order';
   if (includes(/\b(?:compare|greater than|less than|how many more|how many fewer|difference)\b/)
     || includes(/\b(?:has|have|is)\s+\d[\d,]*(?:\.\d+)?\s+(?:fewer|less)\b/)) return 'compare';
@@ -611,7 +686,7 @@ function inferQuestionFamily(source, info, equation) {
 function inferRepresentationPurpose(family, source, info) {
   const lower = source.toLowerCase();
   if (['find-error', 'correct-error', 'justify', 'prove', 'explain'].includes(family)) return 'support-reasoning-or-proof';
-  if (['construct-chart', 'plot-coordinates', 'sort', 'classify', 'complete', 'missing-number', 'draw-hands'].includes(family)) return 'record-thinking';
+  if (['construct-chart', 'plot-coordinates', 'sort', 'classify', 'complete', 'missing-number', 'draw-hands', 'locate-on-number-line'].includes(family)) return 'record-thinking';
   if (['interpret-chart'].includes(family)) return 'represent-supplied-data';
   if (['represent', 'partition', 'compare', 'round', 'find-fraction', 'equivalent-fraction'].includes(family)) return 'expose-structure';
   if (info.hasExistingRepresentation) return 'interpret-situation';
@@ -659,6 +734,20 @@ function deriveWordStructure(info, source, family, equation) {
     measurement: null,
     chart: null,
   };
+
+  const numberLine = parseNumberLinePrompt(source);
+  if (family === 'locate-on-number-line' && numberLine) {
+    result.startValue = numberLine.start;
+    result.endValue = numberLine.end;
+    result.interval = numberLine.step;
+    result.scale = {
+      start: numberLine.start,
+      end: numberLine.end,
+      divisions: numberLine.divisions,
+      target: numberLine.target,
+    };
+    result.unknownPosition ??= 'line-position';
+  }
 
   if (family === 'round') {
     const magnitude = nearestMagnitude(lower);
@@ -852,6 +941,7 @@ function answerProtection(family, source, structure, equation) {
   if (/\b(?:draw|show)\b.*\b(?:hands?|clock)\b/i.test(source)) add('clock-hands', 'The pupil is being asked to set the clock hands.');
   if (family === 'find-area') add('area', 'The calculated area must not be printed in the model.');
   if (family === 'find-perimeter') add('perimeter', 'The calculated perimeter must not be printed in the model.');
+  if (family === 'locate-on-number-line') add('line-position', 'The pupil must choose the position on the supplied scale.');
   if (structure.unknownPosition === 'fraction-of-quantity-result') add('fraction-of-quantity-result', 'The selected fraction of the quantity is the pupil calculation.');
   if (family === 'find-error' || family === 'correct-error') add('correction', 'The source misconception must remain visible for analysis.');
   const risk = prohibited.size >= 2 || equation?.unknownPosition ? 'high' : prohibited.size ? 'medium' : 'low';
@@ -867,7 +957,7 @@ function interpretationConfidence(info, family, structure, domains, equation) {
   let score = 0;
   if (domains.length && domains[0].score >= 7) score += 3;
   if (equation?.exact) score += 3;
-  if (structure.comparison || structure.rounding || structure.measurement || structure.numerator !== null || structure.numberOfGroups !== null) score += 2;
+  if (structure.comparison || structure.rounding || structure.measurement || structure.scale || structure.numerator !== null || structure.numberOfGroups !== null) score += 2;
   if (info.operations.length === 1) score += 1;
   if (info.operations.length > 1 && !/\b(?:two-step|multi-step)\b/i.test(info.analysedText)) score -= 2;
   if (family === 'word-problem' || family === 'explain') score -= 1;
@@ -976,7 +1066,9 @@ function rankedIdealCandidates(interpretation) {
     if (!isFamilyContraindicated(id, interpretation)) candidates.push(candidate(id, score, reason, purpose, options));
   };
 
-  if (family === 'round' && structure.rounding) {
+  if (family === 'locate-on-number-line' && structure.scale) {
+    add('number-line', 100, 'Uses the exact endpoints and equal fraction intervals named in the question.', 'record-thinking');
+  } else if (family === 'round' && structure.rounding) {
     add('rounding-number-line', 100, 'Shows the two neighbouring multiples and the exact midpoint.');
     add('four-digit-number-line', 74, 'Offers a broader number-line alternative when the surrounding interval matters.');
   } else if (domain === 'Number and place value') {
@@ -1044,11 +1136,20 @@ function rankedIdealCandidates(interpretation) {
   }
 
   if (domain === 'Fractions') {
-    if (family === 'equivalent-fraction') {
+    // A supplied fraction scale is already the exact representation for a
+    // locating task. Do not dilute it with a generic strip: that can make a
+    // high-confidence number-line task look ambiguous and prevent a safe
+    // first draft from attaching the model at all.
+    if (family === 'locate-on-number-line') {
+      // The exact number-line candidate was added above.
+    } else if (family === 'equivalent-fraction') {
       add('equivalent-fraction-strips', 100, 'Vertically aligns equal wholes so equivalent points can be compared accurately.');
       add('fraction-wall', 91, 'Shows denominator rows on a constant whole.');
     } else if (family === 'compare-fractions') {
-      add('fraction-number-line', 96, 'Locates both fractions on one consistently partitioned scale.');
+      const benchmarkDistance = /\bcloser\s+to\b/i.test(interpretation.normalisedText);
+      add('fraction-number-line', benchmarkDistance ? 100 : 96, benchmarkDistance
+        ? 'Shows the benchmark and both fractions on one consistently partitioned scale.'
+        : 'Locates both fractions on one consistently partitioned scale.');
       add('fraction-wall', 88, 'Provides an equal-whole comparison alternative.');
     } else if (structure.whole !== null && structure.denominator !== null) {
       add('fraction-quantity-bar', 98, 'Divides the known quantity into equal denominator parts while keeping the selected result hidden.');

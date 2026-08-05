@@ -14,6 +14,8 @@ import {
   matchModels,
   matchQuestionToModels
 } from '../js/matcher.js';
+import { createModelRecipe as createRegisteredRecipe, validateRecipe } from '../js/model-registry.js';
+import { renderModel } from '../js/model-renderers.js';
 
 test('parses ten numbered questions into ten exact source cards', () => {
   const source = [
@@ -200,6 +202,49 @@ test('number-line recipes preserve consistent intervals', () => {
   const differences = recipe.values.ticks.slice(1)
     .map((tick, index) => Number((tick - recipe.values.ticks[index]).toFixed(8)));
   assert.ok(differences.every((difference) => difference === differences[0]));
+});
+
+test('mixed fraction location lines retain exact endpoints, intervals and a blank pupil target', () => {
+  const source = 'Place 2 3/5 on a number line from 2 to 3 divided into fifths.';
+  const info = extractMathInfo(source);
+  assert.deepEqual(info.fractions.map((fraction) => ({ raw: fraction.raw, value: fraction.value, mixed: fraction.mixed })), [
+    { raw: '2 3/5', value: 2.6, mixed: true },
+  ]);
+  assert.deepEqual(info.numericValues, [2, 3]);
+  const result = matchModels(info);
+  const recipe = result.suggestions[0].recipe;
+  assert.equal(result.interpretation.questionFamily, 'locate-on-number-line');
+  assert.equal(recipe.family, 'number-line');
+  assert.deepEqual(recipe.values.ticks, [2, 2.2, 2.4, 2.6, 2.8, 3]);
+  assert.deepEqual(recipe.values.markers, [{ value: 2.6, label: '2 3/5' }]);
+  assert.equal(recipe.unknown, 'marker:0');
+  assert.equal(recipe.purpose, 'response-model');
+
+  const registered = createRegisteredRecipe('number-line', recipe);
+  assert.equal(validateRecipe(registered).valid, true);
+  const pupil = renderModel(registered);
+  assert.match(pupil, /viewBox="0 0 900 120"/);
+  assert.doesNotMatch(pupil, /<circle\b/, 'The pupil must choose the point instead of tracing a pre-positioned marker.');
+  assert.doesNotMatch(pupil, />2\.6<|>2\.4<|>2\.8</);
+  const teacher = renderModel({ ...registered, completionState: 'completed', purpose: 'thinking-model', unknown: null });
+  assert.match(teacher, /<circle\b/);
+  assert.match(teacher, />2\.6</);
+});
+
+test('mixed-fraction ordering keeps the complete 2 to 3 quarter scale without inventing markers', () => {
+  const result = matchModels('Order 2 1/4, 2 3/4 and 2 1/2 by position on a number line.');
+  const recipe = result.suggestions[0].recipe;
+  assert.equal(recipe.family, 'number-line');
+  assert.deepEqual(recipe.values, {
+    start: 2,
+    end: 3,
+    divisions: 4,
+    step: 0.25,
+    ticks: [2, 2.25, 2.5, 2.75, 3],
+    points: [],
+    markers: [],
+  });
+  assert.equal(recipe.purpose, 'response-model');
 });
 
 test('distinguishes additive part-whole and comparison bar relationships', () => {

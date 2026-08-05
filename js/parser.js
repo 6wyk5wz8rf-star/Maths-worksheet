@@ -429,6 +429,31 @@ export function extractMathInfo(text) {
     }
   );
 
+  // Read mixed numbers before ordinary fractions.  Leaving `2 3/5` as a
+  // separate `2` and `3/5` makes a number-line task look as though it has two
+  // unrelated values, which is both mathematically false and especially
+  // harmful when the pupil is meant to locate that exact value.
+  collectPattern(
+    source,
+    /\b([\u2212-]?\d+)\s+(\d+)\s*\/\s*(\d+)\b/g,
+    'fraction',
+    occupied,
+    quantities,
+    (match) => {
+      const whole = normaliseNumber(match[1]);
+      const numerator = normaliseNumber(match[2]);
+      const denominator = normaliseNumber(match[3]);
+      if (denominator === 0) warnings.push(`The source contains an undefined fraction: ${match[0]}.`);
+      if (!Number.isFinite(whole) || !Number.isFinite(numerator) || !Number.isFinite(denominator)) return null;
+      const sign = whole < 0 ? -1 : 1;
+      return {
+        raw: match[0], whole, numerator, denominator,
+        value: denominator ? whole + (sign * (numerator / denominator)) : null,
+        mixed: true,
+      };
+    }
+  );
+
   collectPattern(
     source,
     /\b([\u2212-]?\d+)\s*\/\s*([\u2212-]?\d+)\b/g,

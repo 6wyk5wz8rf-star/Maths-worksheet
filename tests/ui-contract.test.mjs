@@ -53,11 +53,17 @@ test('touch, reduced motion and iPad-width layouts have explicit support', async
 });
 
 test('release UI keeps worksheet controls contextual and tablet navigation reachable', async () => {
-  const css = await source('css/styles.css');
+  const [css, app] = await Promise.all([
+    source('css/styles.css'),
+    source('js/app.js')
+  ]);
   assert.match(css, /\.block-screen-tools\.screen-only\s*\{\s*display:\s*none;/);
   assert.match(css, /\.question-block\.is-selected \.block-screen-tools\.screen-only\s*\{\s*display:\s*grid;/);
   assert.match(css, /\.print-preview-panel \.block-screen-tools\.screen-only\s*\{\s*display:\s*none\s*!important;/);
-  assert.match(css, /\.mobile-panel-tabs,\s*\.mobile-navigator-sheet\s*\{\s*display:\s*none;/);
+  assert.match(css, /\.mobile-panel-tabs\s*\{\s*display:\s*none;/);
+  assert.match(css, /\.mobile-navigator-sheet\s*\{[\s\S]*?display:\s*none;/);
+  assert.match(css, /\.mobile-navigator-sheet\.is-open\s*\{\s*display:\s*block;/);
+  assert.match(css, /\.make-layout\s*\{[\s\S]*?grid-template-columns:\s*minmax\(420px, 1fr\) 320px;/);
 
   const tabletStart = css.indexOf('@media (max-width: 980px)');
   const narrowStart = css.indexOf('@media (max-width: 760px)');
@@ -67,6 +73,10 @@ test('release UI keeps worksheet controls contextual and tablet navigation reach
   assert.match(tabletCss, /\.make-toolbar\s*\{[\s\S]*?height:\s*108px;/);
   assert.doesNotMatch(css, /\.view-toggle\s*\{\s*display:\s*none;/);
   assert.doesNotMatch(css, /\.card-tools \.move-tool\s*\{\s*display:\s*none;/);
+  assert.match(app, /data-action="create-workbook-version"/);
+  assert.match(app, /Workbook cut-outs needs \$\{pagination\.pageCount\} pages at a readable size\. Nothing has been shrunk\./);
+  assert.match(app, /data-key="size" data-value="extra-large"/);
+  assert.match(app, /function readableQuestionFamily/);
 });
 
 test('tablet sheets expose their state and move focus into and back from the active region', async () => {

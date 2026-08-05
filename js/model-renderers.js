@@ -9,6 +9,18 @@ const SIZE_BOXES = Object.freeze({
   compact: { width: 420, height: 150 },
   standard: { width: 560, height: 210 },
   large: { width: 700, height: 270 },
+  'extra-large': { width: 860, height: 330 },
+});
+
+// Number lines and fraction strips are deliberately shallow, wide models.
+// A tall default SVG in a shallow A4 slot uses `meet` to protect its aspect
+// ratio, but leaves most of the printable width unused. These boxes preserve
+// the mathematical geometry while letting the actual line fill the page.
+const WIDE_SIZE_BOXES = Object.freeze({
+  compact: { width: 620, height: 116 },
+  standard: { width: 900, height: 120 },
+  large: { width: 1060, height: 126 },
+  'extra-large': { width: 1220, height: 136 },
 });
 
 function escapeMarkup(value) {
@@ -211,7 +223,8 @@ function renderNumberLine(recipe, definition) {
     const ticks = points.map((point, index) => {
       const x = lineStart + intervalWidth * index;
       const endpoint = index === 0 || index === points.length - 1;
-      const showLabel = recipe.variant !== "empty" && (recipe.completionState === "completed" || (recipe.completionState === "partly-completed" && (endpoint || recipe.values.divisions <= 10)));
+      const showLabel = recipe.variant !== "empty" && (recipe.completionState === "completed"
+        || (recipe.completionState === "partly-completed" && (endpoint || (recipe.purpose !== "response-model" && recipe.values.divisions <= 10))));
       const label = showLabel ? shown(recipe, `point:${index}`, point) : "";
       return `<line x1="${x}" y1="${y - (endpoint ? 13 : 9)}" x2="${x}" y2="${y + (endpoint ? 13 : 9)}" stroke="currentColor" stroke-width="${endpoint ? 2 : 1}" />
         ${label ? svgText(x, y + 36, label, "mps-model__tick-label") : ""}`;
@@ -219,6 +232,10 @@ function renderNumberLine(recipe, definition) {
     const markers = recipe.values.markers.map((marker, index) => {
       const x = lineStart + ((marker.value - recipe.values.start) / (recipe.values.end - recipe.values.start)) * (lineEnd - lineStart);
       const markerVisible = visible(recipe, `marker:${index}`);
+      // A location task asks the pupil to choose the point, not to trace a
+      // pre-positioned question mark.  Keep the scale completely blank in a
+      // response model; teacher/answer output can reveal the marker normally.
+      if (!markerVisible && recipe.purpose === "response-model") return "";
       if (!markerVisible && recipe.completionState !== "blank") return `<circle cx="${x}" cy="${y}" r="7" fill="white" stroke="currentColor" stroke-width="2" /><text x="${x}" y="${y - 18}" text-anchor="middle" class="mps-model__unknown">?</text>`;
       if (!markerVisible) return "";
       return `<circle cx="${x}" cy="${y}" r="6" fill="currentColor" />${svgText(x, y - 18, marker.label, "mps-model__marker-label")}`;
@@ -226,7 +243,7 @@ function renderNumberLine(recipe, definition) {
     return `<line x1="${lineStart}" y1="${y}" x2="${lineEnd}" y2="${y}" stroke="currentColor" stroke-width="2" />
       <path d="M ${lineEnd} ${y} l -10 -6 v 12 z" fill="currentColor" />
       ${ticks}${markers}`;
-  });
+  }, { box: WIDE_SIZE_BOXES[recipe.size] ?? WIDE_SIZE_BOXES.standard });
 }
 
 function renderPartWhole(recipe, definition) {
@@ -413,7 +430,7 @@ function renderMultiplicationGrid(recipe, definition) {
 
 function renderFractionStrip(recipe, definition) {
   const stripCount = recipe.values.fractions.length;
-  const base = SIZE_BOXES[recipe.size];
+  const base = WIDE_SIZE_BOXES[recipe.size] ?? WIDE_SIZE_BOXES.standard;
   const height = Math.max(base.height, 50 + stripCount * 62);
   return svgFrame(recipe, definition, (id, box) => {
     const x0 = 60;
